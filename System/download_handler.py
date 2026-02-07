@@ -1,10 +1,11 @@
 import yt_dlp
 import json
 import sys
-import os
-
 
 class DownloadHandler:
+    def __init__(self, task_id):
+        self.task_id = task_id
+
     def _progress_hook(self, d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
@@ -14,67 +15,57 @@ class DownloadHandler:
             if total > 0:
                 percent = (downloaded / total) * 100
 
-            eta = d.get('eta', 0)
-            speed = d.get('speed', 0)
-
             msg = {
                 "type": "progress",
+                "id": self.task_id,
                 "percent": percent,
-                "eta": eta,
-                "speed": speed,
+                "eta": d.get('eta', 0),
+                "speed": d.get('speed', 0),
                 "filename": d.get('filename', '')
             }
             print(json.dumps(msg), flush=True)
 
         elif d['status'] == 'finished':
-            print(json.dumps({"type": "status", "msg": "Processing..."}), flush=True)
+            print(json.dumps({
+                "type": "status",
+                "id": self.task_id,
+                "msg": "Przetwarzanie (FFmpeg)..."
+            }), flush=True)
 
-    def run(self, data):
-        url = data.get("url")
-        args = data.get("args", {})
-        path = args.get("path", ".")
-
-        ydl_opts = {
-            'outtmpl': f'{path}/%(title)s.%(ext)s',
-            'progress_hooks': [self._progress_hook],
-            'quiet': True,
-            'no_warnings': True,
-        }
-
-        if args.get("audioOnly"):
-            ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': args.get('audioFormat', 'mp3'),
-                'preferredquality': args.get('audioQuality', '192').replace('k', ''),
-            }]
-        else:
-            v_fmt = args.get("videoFormat", "mp4")
-            if v_fmt == "mp4":
-                ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-            else:
-                ydl_opts['format'] = f'bestvideo+bestaudio/best'
-                ydl_opts['merge_output_format'] = v_fmt
-
-        if args.get("cookiesBrowser") and args.get("cookiesBrowser") != "None":
-            ydl_opts['cookiesfrombrowser'] = (args.get("cookiesBrowser").lower(), None, None, None)
-
-        if args.get("downloadSubs"):
-            ydl_opts['writesubtitles'] = True
-            if args.get("subsLang"):
-                ydl_opts['subtitleslangs'] = [args.get("subsLang")]
-            else:
-                ydl_opts['writeautomaticsub'] = True
-
-        if args.get("ffmpegLocation"):
-            ydl_opts['ffmpeg_location'] = args.get("ffmpegLocation")
-
+    def run(self, args_list):
         try:
+            parsed_args = yt_dlp.parse_options(args_list)
+
+            ydl_opts = parsed_args[3]
+            urls = parsed_args[2]
+
+            if 'progress_hooks' not in ydl_opts:
+                ydl_opts['progress_hooks'] = []
+            ydl_opts['progress_hooks'].append(self._progress_hook)
+
+            ydl_opts['quiet'] = True
+            ydl_opts['no_warnings'] = True
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download(urls)
 
-                ydl.download([url])
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": True
+            }), flush=True)
 
-            print(json.dumps({"type": "finished", "success": True}), flush=True)
-
+        except SystemExit:
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": "Cancelled"
+            }), flush=True)
         except Exception as e:
-            print(json.dumps({"type": "finished", "success": False, "error": str(e)}), flush=True)
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": str(e)
+            }), flush=True)
