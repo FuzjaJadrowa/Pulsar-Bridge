@@ -1,2 +1,2 @@
-https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
+yt-dlp
 pyinstaller
