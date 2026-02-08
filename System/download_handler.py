@@ -54,19 +54,14 @@ class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 
-    def _get_ffmpeg_path(self):
-        filename = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-
+    def _get_ffmpeg_location(self):
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
         else:
-            base_path = os.getcwd()
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-        path = os.path.join(base_path, filename)
-
-        if os.path.exists(path):
-            return path
-        return None
+        bin_path = os.path.join(base_path, 'bin')
+        return bin_path
 
     def _progress_hook(self, d):
         if d['status'] == 'downloading':
@@ -109,9 +104,8 @@ class DownloadHandler:
             ydl_opts['no_color'] = True
             ydl_opts['ignoreerrors'] = False
 
-            ffmpeg_path = self._get_ffmpeg_path()
-            if ffmpeg_path:
-                ydl_opts['ffmpeg_location'] = ffmpeg_path
+            ffmpeg_loc = self._get_ffmpeg_location()
+            ydl_opts['ffmpeg_location'] = ffmpeg_loc
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 retcode = ydl.download(urls)
