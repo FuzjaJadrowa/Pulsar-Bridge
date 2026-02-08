@@ -1,10 +1,72 @@
 import yt_dlp
 import json
+import re
 import sys
+import os
+
+class BridgeLogger:
+    def __init__(self, task_id):
+        self.task_id = task_id
+        self.ffmpeg_regex = re.compile(r"time=(\d{2}:\d{2}:\d{2}\.\d+).*?speed=\s*(\d+\.?\d*x)")
+
+    def debug(self, msg):
+        if "frame=" in msg and "time=" in msg:
+            match = self.ffmpeg_regex.search(msg)
+            if match:
+                print(json.dumps({
+                    "type": "progress",
+                    "id": self.task_id,
+                    "status": "processing",
+                    "time": match.group(1),
+                    "speed": match.group(2)
+                }), flush=True)
+            else:
+                print(json.dumps({
+                    "type": "progress",
+                    "id": self.task_id,
+                    "status": "processing",
+                    "raw": msg.strip()
+                }), flush=True)
+        elif not msg.startswith('[download] '):
+            pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        print(json.dumps({
+            "type": "log",
+            "level": "warning",
+            "id": self.task_id,
+            "message": msg
+        }), flush=True)
+
+    def error(self, msg):
+        print(json.dumps({
+            "type": "log",
+            "level": "error",
+            "id": self.task_id,
+            "message": msg
+        }), flush=True)
+
 
 class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
+
+    def _get_ffmpeg_path(self):
+        filename = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.getcwd()
+
+        path = os.path.join(base_path, filename)
+
+        if os.path.exists(path):
+            return path
+        return None
 
     def _progress_hook(self, d):
         if d['status'] == 'downloading':
@@ -21,7 +83,8 @@ class DownloadHandler:
                 "percent": percent,
                 "eta": d.get('eta', 0),
                 "speed": d.get('speed', 0),
-                "filename": d.get('filename', '')
+                "filename": d.get('filename', ''),
+                "status": "downloading"
             }
             print(json.dumps(msg), flush=True)
 
@@ -29,13 +92,12 @@ class DownloadHandler:
             print(json.dumps({
                 "type": "status",
                 "id": self.task_id,
-                "msg": "Przetwarzanie (FFmpeg)..."
+                "msg": "File downloaded, starting post-processing..."
             }), flush=True)
 
     def run(self, args_list):
         try:
             parsed_args = yt_dlp.parse_options(args_list)
-
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 
@@ -43,11 +105,19 @@ class DownloadHandler:
                 ydl_opts['progress_hooks'] = []
             ydl_opts['progress_hooks'].append(self._progress_hook)
 
-            ydl_opts['quiet'] = True
-            ydl_opts['no_warnings'] = True
+            ydl_opts['logger'] = BridgeLogger(self.task_id)
+            ydl_opts['no_color'] = True
+            ydl_opts['ignoreerrors'] = False
+
+            ffmpeg_path = self._get_ffmpeg_path()
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download(urls)
+                retcode = ydl.download(urls)
+
+            if retcode != 0:
+                raise Exception(f"yt-dlp exited with error code {retcode}")
 
             print(json.dumps({
                 "type": "finished",
@@ -63,9 +133,13 @@ class DownloadHandler:
                 "error": "Cancelled"
             }), flush=True)
         except Exception as e:
+            error_msg = str(e)
+            if "yt-dlp exited with error code" in error_msg:
+                error_msg = "Download failed"
+
             print(json.dumps({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": error_msg
             }), flush=True)

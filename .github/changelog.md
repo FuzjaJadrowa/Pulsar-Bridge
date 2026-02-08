@@ -1,2 +1,4 @@
-Added unique id for downloads and many many changes to yt-dlp parsing.
-Added ability to kill download
+# Build 3
+- Removed default yt-dlp output.
+- Many fixes to parsing system.
+- Added portable ffmpeg to `.exe` file.
