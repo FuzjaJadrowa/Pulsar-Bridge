@@ -1,8 +1,6 @@
 import yt_dlp
 import json
 import re
-import sys
-import os
 
 class BridgeLogger:
     def __init__(self, task_id):
@@ -54,15 +52,6 @@ class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 
-    def _get_ffmpeg_location(self):
-        if getattr(sys, 'frozen', False):
-            base_path = sys._MEIPASS
-        else:
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-        bin_path = os.path.join(base_path, 'bin')
-        return bin_path
-
     def _progress_hook(self, d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
@@ -102,10 +91,8 @@ class DownloadHandler:
 
             ydl_opts['logger'] = BridgeLogger(self.task_id)
             ydl_opts['no_color'] = True
-            ydl_opts['ignoreerrors'] = False
 
-            ffmpeg_loc = self._get_ffmpeg_location()
-            ydl_opts['ffmpeg_location'] = ffmpeg_loc
+            ydl_opts['ignoreerrors'] = False
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 retcode = ydl.download(urls)
@@ -129,7 +116,7 @@ class DownloadHandler:
         except Exception as e:
             error_msg = str(e)
             if "yt-dlp exited with error code" in error_msg:
-                error_msg = "Download failed"
+                error_msg = "Download failed."
 
             print(json.dumps({
                 "type": "finished",

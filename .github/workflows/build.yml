@@ -17,19 +17,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
             artifact_name: pulsar-bridge-linux
             exe_name: pulsar-bridge
-            sep: ':'
           - os: windows-latest
             artifact_name: pulsar-bridge-windows.exe
             exe_name: pulsar-bridge.exe
-            sep: ';'
           - os: macos-latest
             artifact_name: pulsar-bridge-macos
             exe_name: pulsar-bridge
-            sep: ':'
 
     steps:
     - uses: actions/checkout@v4
@@ -44,38 +42,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Download FFmpeg (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Force -Path ffmpeg_bin
-        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-git-full.7z" -OutFile "ffmpeg.7z"
-        7z e ffmpeg.7z -offmpeg_bin *.exe -r
-        Get-ChildItem -Path ffmpeg_bin -Recurse | Where-Object { $_.Name -match 'ffmpeg|ffprobe|ffplay' } | Move-Item -Destination ffmpeg_bin -Force
-
-    - name: Download FFmpeg (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        mkdir -p ffmpeg_bin
-        wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-        tar -xf ffmpeg-release-amd64-static.tar.xz --strip-components=1 -C ffmpeg_bin
-        # Czyścimy
-        rm ffmpeg-release-amd64-static.tar.xz
-
-    - name: Download FFmpeg (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        mkdir -p ffmpeg_bin
-        curl -L https://evermeet.cx/ffmpeg/getrelease/zip -o ffmpeg.zip
-        curl -L https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip -o ffprobe.zip
-        curl -L https://evermeet.cx/ffmpeg/getrelease/ffplay/zip -o ffplay.zip
-        unzip -o ffmpeg.zip -d ffmpeg_bin
-        unzip -o ffprobe.zip -d ffmpeg_bin
-        unzip -o ffplay.zip -d ffmpeg_bin
-
     - name: Build with PyInstaller
       run: |
-        pyinstaller --clean --onefile --name ${{ matrix.exe_name }} --add-binary "ffmpeg_bin/*${{ matrix.sep }}bin" main.py
+        pyinstaller --clean --onefile --name ${{ matrix.exe_name }} main.py
 
     - name: Rename binary for release
       shell: bash
@@ -109,10 +78,14 @@ jobs:
         id: release_data
         run: |
           DATE=$(date +'%d.%m.%Y')
+          
           TAG_NAME=${{ github.ref_name }}
           BUILD_NUM=${TAG_NAME#b}
+          
           echo "DATE=$DATE" >> $GITHUB_ENV
           echo "BUILD_NUM=$BUILD_NUM" >> $GITHUB_ENV
+          
+          echo "Release created: Build $BUILD_NUM from day $DATE"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
