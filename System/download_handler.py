@@ -1,30 +1,23 @@
 import yt_dlp
 import json
-import re
+from System.ffmpeg_output_parser import FFMpegOutputParser
+from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
 
 class BridgeLogger:
     def __init__(self, task_id):
         self.task_id = task_id
-        self.ffmpeg_regex = re.compile(r"time=(\d{2}:\d{2}:\d{2}\.\d+).*?speed=\s*(\d+\.?\d*x)")
+        self.ffmpeg_parser = FFMpegOutputParser()
 
     def debug(self, msg):
-        if "frame=" in msg and "time=" in msg:
-            match = self.ffmpeg_regex.search(msg)
-            if match:
-                print(json.dumps({
-                    "type": "progress",
-                    "id": self.task_id,
-                    "status": "processing",
-                    "time": match.group(1),
-                    "speed": match.group(2)
-                }), flush=True)
-            else:
-                print(json.dumps({
-                    "type": "progress",
-                    "id": self.task_id,
-                    "status": "processing",
-                    "raw": msg.strip()
-                }), flush=True)
+        ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
+        if ffmpeg_data:
+            payload = {
+                "type": "progress",
+                "id": self.task_id,
+                "status": "processing"
+            }
+            payload.update(ffmpeg_data)
+            print(json.dumps(payload), flush=True)
         elif not msg.startswith('[download] '):
             pass
 
@@ -94,8 +87,9 @@ class DownloadHandler:
 
             ydl_opts['ignoreerrors'] = False
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                retcode = ydl.download(urls)
+            with patch_ffmpeg_popen_for_progress(self.task_id):
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    retcode = ydl.download(urls)
 
             if retcode != 0:
                 raise Exception(f"yt-dlp exited with error code {retcode}")
