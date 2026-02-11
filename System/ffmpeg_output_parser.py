@@ -21,5 +21,4 @@ class FFMpegOutputParser:
             return None
 
         result = {k: v for k, v in match.groupdict().items() if v is not None}
-        result["raw"] = message.strip()
         return result

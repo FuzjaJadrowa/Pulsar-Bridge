@@ -1,3 +1,4 @@
-# Build 3
-- Removed default yt-dlp output.
-- Many fixes to parsing system.
+# Build 4
+- Added final patch to ffmpeg output.
+- Added `metadata` id.
+- Created new method to fetch video metadata faster than normal output.

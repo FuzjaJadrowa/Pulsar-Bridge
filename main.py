@@ -1,7 +1,7 @@
 import sys
 import json
 import traceback
-from System.download_handler import DownloadHandler
+from System.download_handler import DownloadHandler, MetadataHandler
 from System.killable_thread import KillableThread
 
 active_tasks = {}
@@ -30,11 +30,26 @@ def main():
                     continue
 
                 args = data.get("args", [])
-
                 handler = DownloadHandler(task_id)
-
                 t = KillableThread(target=handler.run, args=(args,), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
 
+
+            elif command == "metadata":
+                if not task_id:
+                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
+                    continue
+
+                url = data.get("url")
+                args_list = data.get("args", [])
+
+                if not url:
+                    print(json.dumps({"type": "error", "message": "No URL provided for metadata"}), flush=True)
+                    continue
+
+                handler = MetadataHandler(task_id)
+                t = KillableThread(target=handler.run, args=(url, args_list), daemon=True)
                 active_tasks[task_id] = t
                 t.start()
 

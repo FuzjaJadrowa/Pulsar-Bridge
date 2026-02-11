@@ -12,7 +12,7 @@ class BridgeLogger:
         ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
         if ffmpeg_data:
             payload = {
-                "type": "progress",
+                "type": "progress_ffmpeg",
                 "id": self.task_id,
                 "status": "processing"
             }
@@ -84,7 +84,6 @@ class DownloadHandler:
 
             ydl_opts['logger'] = BridgeLogger(self.task_id)
             ydl_opts['no_color'] = True
-
             ydl_opts['ignoreerrors'] = False
 
             with patch_ffmpeg_popen_for_progress(self.task_id):
@@ -117,4 +116,91 @@ class DownloadHandler:
                 "id": self.task_id,
                 "success": False,
                 "error": error_msg
+            }), flush=True)
+
+class MetadataHandler:
+    def __init__(self, task_id):
+        self.task_id = task_id
+
+    def _filter_metadata(self, info):
+        keys_to_keep = [
+            'id', 'title', 'fulltitle', 'thumbnail', 'description',
+            'uploader', 'uploader_id', 'uploader_url',
+            'upload_date', 'duration', 'duration_string',
+            'view_count', 'like_count', 'comment_count',
+            'age_limit', 'is_live', 'was_live', 'availability',
+            'channel', 'channel_follower_count', 'webpage_url'
+        ]
+        filtered = {k: info.get(k) for k in keys_to_keep if k in info}
+
+        if 'formats' in info:
+            clean_formats = []
+            for f in info['formats']:
+                clean_f = {
+                    'format_id': f.get('format_id'),
+                    'ext': f.get('ext'),
+                    'resolution': f.get('resolution'),
+                    'filesize': f.get('filesize'),
+                    'filesize_approx': f.get('filesize_approx'),
+                    'vcodec': f.get('vcodec'),
+                    'acodec': f.get('acodec'),
+                    'note': f.get('format_note'),
+                }
+                clean_formats.append(clean_f)
+            filtered['formats'] = clean_formats
+
+        if 'subtitles' in info and info['subtitles']:
+            filtered['subtitles_langs'] = list(info['subtitles'].keys())
+
+        if 'automatic_captions' in info and info['automatic_captions']:
+            filtered['auto_captions_langs'] = list(info['automatic_captions'].keys())
+
+        return filtered
+
+    def run(self, url, args_list=None):
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'logger': BridgeLogger(self.task_id),
+                'simulate': True,
+                'skip_download': True,
+            }
+
+            if args_list:
+                try:
+                    parsed_args = yt_dlp.parse_options(args_list)
+                    user_opts = parsed_args[3]
+                    ydl_opts.update(user_opts)
+
+                    ydl_opts.update({
+                        'quiet': True,
+                        'no_warnings': True,
+                        'simulate': True,
+                        'skip_download': True,
+                        'logger': BridgeLogger(self.task_id)
+                    })
+                except Exception as e:
+                    print(json.dumps({"type": "error", "message": f"Args error: {str(e)}"}), flush=True)
+                    return
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                clean_info = ydl.sanitize_info(info)
+                minimized_info = self._filter_metadata(clean_info)
+
+            print(json.dumps({
+                "type": "metadata",
+                "id": self.task_id,
+                "success": True,
+                "data": minimized_info
+            }), flush=True)
+
+        except Exception as e:
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": str(e)
             }), flush=True)

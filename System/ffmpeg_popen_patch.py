@@ -65,7 +65,7 @@ def patch_ffmpeg_popen_for_progress(task_id):
             ffmpeg_data = parser.parse_progress_line(line)
             if ffmpeg_data:
                 payload = {
-                    "type": "progress",
+                    "type": "progress_ffmpeg",
                     "id": task_id,
                     "status": "processing",
                 }
