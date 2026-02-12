@@ -157,8 +157,21 @@ class MetadataHandler:
 
         return filtered
 
-    def run(self, url, args_list=None):
+    def run(self, args):
         try:
+            parsed_args = yt_dlp.parse_options(args)
+            ydl_opts = parsed_args[3]
+            urls = parsed_args[2]
+
+            if not urls:
+                print(json.dumps({
+                    "type": "finished",
+                    "id": self.task_id,
+                    "success": False,
+                    "error": "No URL provided for metadata"
+                }), flush=True)
+                return
+
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
@@ -166,11 +179,12 @@ class MetadataHandler:
                 'logger': BridgeLogger(self.task_id),
                 'simulate': True,
                 'skip_download': True,
+                **ydl_opts,
             }
 
-            if args_list:
+            if args:
                 try:
-                    parsed_args = yt_dlp.parse_options(args_list)
+                    parsed_args = yt_dlp.parse_options(args)
                     user_opts = parsed_args[3]
                     ydl_opts.update(user_opts)
 
@@ -186,7 +200,7 @@ class MetadataHandler:
                     return
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(urls[0], download=False)
                 clean_info = ydl.sanitize_info(info)
                 minimized_info = self._filter_metadata(clean_info)
 

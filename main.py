@@ -41,15 +41,10 @@ def main():
                     print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
                     continue
 
-                url = data.get("url")
-                args_list = data.get("args", [])
-
-                if not url:
-                    print(json.dumps({"type": "error", "message": "No URL provided for metadata"}), flush=True)
-                    continue
+                args = data.get("args", [])
 
                 handler = MetadataHandler(task_id)
-                t = KillableThread(target=handler.run, args=(url, args_list), daemon=True)
+                t = KillableThread(target=handler.run, args=(args,), daemon=True)
                 active_tasks[task_id] = t
                 t.start()
 
