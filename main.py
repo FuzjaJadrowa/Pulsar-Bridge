@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import traceback
@@ -8,6 +9,12 @@ active_tasks = {}
 
 
 def main():
+    user_home = os.path.expanduser("~")
+    deno_path = os.path.join(user_home, ".deno", "bin")
+
+    if os.path.exists(deno_path) and deno_path not in os.environ["PATH"]:
+        os.environ["PATH"] += os.pathsep + deno_path
+
     if sys.platform == "win32":
         import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')

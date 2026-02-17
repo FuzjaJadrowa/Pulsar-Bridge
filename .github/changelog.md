@@ -1,2 +1,2 @@
-# Build 5
-- Unified input constructions for the `metadata` command
+# Build 6
+- Added deno resolver to python PATH.
