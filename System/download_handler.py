@@ -74,7 +74,10 @@ class DownloadHandler:
 
     def run(self, args_list):
         try:
-            parsed_args = yt_dlp.parse_options(args_list)
+            extra_args = ["--remote-components", "ejs:github"]
+            final_args = extra_args + args_list
+
+            parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 
@@ -159,7 +162,10 @@ class MetadataHandler:
 
     def run(self, args):
         try:
-            parsed_args = yt_dlp.parse_options(args)
+            extra_args = ["--remote-components", "ejs:github"]
+            final_args = extra_args + args
+
+            parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 
@@ -184,7 +190,7 @@ class MetadataHandler:
 
             if args:
                 try:
-                    parsed_args = yt_dlp.parse_options(args)
+                    parsed_args = yt_dlp.parse_options(final_args)
                     user_opts = parsed_args[3]
                     ydl_opts.update(user_opts)
 
