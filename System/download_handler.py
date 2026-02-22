@@ -1,4 +1,4 @@
-import yt_dlp
+﻿import yt_dlp
 import json
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
@@ -239,6 +239,23 @@ class SearchHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 
+    @staticmethod
+    def _format_duration(seconds):
+        if seconds is None:
+            return None
+        try:
+            total = int(float(seconds))
+        except (TypeError, ValueError):
+            return None
+        if total < 0:
+            total = 0
+        hrs = total // 3600
+        mins = (total % 3600) // 60
+        secs = total % 60
+        if hrs > 0:
+            return f"{hrs}:{mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}"
+
     def run(self, args):
         try:
             extra_args = ["--remote-components", "ejs:github"]
@@ -268,10 +285,7 @@ class SearchHandler:
             ydl_opts.update(override_opts)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(urls[0], download=False, process=False)
-
-                if info is None:
-                    raise Exception("Nie udało się pobrać wyników wyszukiwania.")
+                info = ydl.extract_info(urls[0], download=False)
 
                 raw_entries = info.get('entries', []) if info.get('_type') in ['playlist', 'multi_video'] else [info]
 
@@ -284,11 +298,15 @@ class SearchHandler:
                     if not thumbnail_url and entry.get('thumbnails'):
                         thumbnail_url = entry['thumbnails'][-1].get('url')
 
+                    duration = entry.get('duration')
+                    duration_string = entry.get('duration_string') or self._format_duration(duration)
+
                     results.append({
                         'id': entry.get('id'),
                         'title': entry.get('title'),
                         'uploader': entry.get('uploader') or entry.get('channel'),
-                        'duration': entry.get('duration'),
+                        'duration': duration,
+                        'duration_string': duration_string,
                         'thumbnail': thumbnail_url,
                         'url': entry.get('url') or entry.get('webpage_url')
                     })
