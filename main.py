@@ -2,11 +2,11 @@ import os
 import sys
 import json
 import traceback
-from System.download_handler import DownloadHandler, MetadataHandler
+from System.download_handler import DownloadHandler, MetadataHandler, SearchHandler
+from System.ffmpeg_popen_patch import kill_processes_for_task
 from System.killable_thread import KillableThread
 
 active_tasks = {}
-
 
 def main():
     if sys.platform == "win32":
@@ -49,11 +49,23 @@ def main():
                 active_tasks[task_id] = t
                 t.start()
 
+            elif command == "search":
+                if not task_id:
+                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
+                    continue
+
+                args = data.get("args", [])
+
+                handler = SearchHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args,), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
+
             elif command == "cancel":
-                if task_id in active_tasks:
-                    thread = active_tasks[task_id]
-                    if thread.is_alive():
-                        thread.terminate()
+                kill_processes_for_task(task_id)
+                thread = active_tasks[task_id]
+                if thread.is_alive():
+                    thread.terminate()
                     del active_tasks[task_id]
                     print(json.dumps({"type": "cancelled", "id": task_id}), flush=True)
                 else:

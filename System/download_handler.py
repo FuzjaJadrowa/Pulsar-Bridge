@@ -2,6 +2,7 @@ import yt_dlp
 import json
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
+from System.spotify_resolver import resolve_spotify_url
 
 class BridgeLogger:
     def __init__(self, task_id):
@@ -80,6 +81,8 @@ class DownloadHandler:
             parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
+
+            urls = [resolve_spotify_url(u) for u in urls]
 
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []
@@ -178,6 +181,8 @@ class MetadataHandler:
                 }), flush=True)
                 return
 
+            urls = [resolve_spotify_url(u) for u in urls]
+
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
@@ -207,6 +212,10 @@ class MetadataHandler:
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(urls[0], download=False)
+
+                if info and info.get('_type') == 'playlist' and info.get('entries'):
+                    info = info['entries'][0]
+
                 clean_info = ydl.sanitize_info(info)
                 minimized_info = self._filter_metadata(clean_info)
 
@@ -215,6 +224,80 @@ class MetadataHandler:
                 "id": self.task_id,
                 "success": True,
                 "data": minimized_info
+            }), flush=True)
+
+        except Exception as e:
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": str(e)
+            }), flush=True)
+
+
+class SearchHandler:
+    def __init__(self, task_id):
+        self.task_id = task_id
+
+    def run(self, args):
+        try:
+            extra_args = ["--remote-components", "ejs:github"]
+            final_args = extra_args + args
+
+            parsed_args = yt_dlp.parse_options(final_args)
+            ydl_opts = parsed_args[3]
+            urls = parsed_args[2]
+
+            if not urls:
+                print(json.dumps({
+                    "type": "finished",
+                    "id": self.task_id,
+                    "success": False,
+                    "error": "No query provided for search"
+                }), flush=True)
+                return
+
+            override_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'logger': BridgeLogger(self.task_id),
+                'simulate': True,
+                'skip_download': True,
+            }
+            ydl_opts.update(override_opts)
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(urls[0], download=False, process=False)
+
+                if info is None:
+                    raise Exception("Nie udało się pobrać wyników wyszukiwania.")
+
+                raw_entries = info.get('entries', []) if info.get('_type') in ['playlist', 'multi_video'] else [info]
+
+                results = []
+                for entry in raw_entries:
+                    if not entry:
+                        continue
+
+                    thumbnail_url = entry.get('thumbnail')
+                    if not thumbnail_url and entry.get('thumbnails'):
+                        thumbnail_url = entry['thumbnails'][-1].get('url')
+
+                    results.append({
+                        'id': entry.get('id'),
+                        'title': entry.get('title'),
+                        'uploader': entry.get('uploader') or entry.get('channel'),
+                        'duration': entry.get('duration'),
+                        'thumbnail': thumbnail_url,
+                        'url': entry.get('url') or entry.get('webpage_url')
+                    })
+
+            print(json.dumps({
+                "type": "search_results",
+                "id": self.task_id,
+                "success": True,
+                "data": results
             }), flush=True)
 
         except Exception as e:

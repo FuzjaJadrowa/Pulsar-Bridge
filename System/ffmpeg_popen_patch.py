@@ -7,6 +7,18 @@ from contextlib import contextmanager
 import yt_dlp.downloader.external as yt_external
 from System.ffmpeg_output_parser import FFMpegOutputParser
 
+_active_popens = {}
+
+def kill_processes_for_task(task_id):
+    popens = _active_popens.get(task_id, [])
+    for p in popens:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    if task_id in _active_popens:
+        del _active_popens[task_id]
+
 @contextmanager
 def patch_ffmpeg_popen_for_progress(task_id):
     original_popen = yt_external.Popen
@@ -32,6 +44,10 @@ def patch_ffmpeg_popen_for_progress(task_id):
                 kwargs.setdefault("bufsize", 0)
 
             super().__init__(args, *remaining, **kwargs)
+
+            if task_id not in _active_popens:
+                _active_popens[task_id] = []
+            _active_popens[task_id].append(self)
 
             if is_ffmpeg and self.stderr is not None:
                 self._stderr_thread = threading.Thread(target=self._consume_ffmpeg_stderr, daemon=True)
@@ -76,6 +92,10 @@ def patch_ffmpeg_popen_for_progress(task_id):
             ret = super().wait(timeout=timeout)
             if self._stderr_thread is not None:
                 self._stderr_thread.join(timeout=1.0)
+
+            if task_id in _active_popens and self in _active_popens[task_id]:
+                _active_popens[task_id].remove(self)
+
             return ret
 
     yt_external.Popen = BridgeFFmpegPopen
@@ -83,3 +103,4 @@ def patch_ffmpeg_popen_for_progress(task_id):
         yield
     finally:
         yt_external.Popen = original_popen
+        kill_processes_for_task(task_id)

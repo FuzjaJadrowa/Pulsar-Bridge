@@ -1,4 +1,4 @@
-# Build 7
-- Changed `args` to `final_args` that is combined `args` and `extra_args`
-- Added `extra_args` to plug a remote resolver to yt-dlp.
-- Deleted adding deno to PATH.
+# Build 8
+- Added a fast search command to quickly fetch basic metadata for multiple videos at once.
+- Added support for Spotify links, automatically converting them into YouTube search queries.
+- Fixed the mechanism for properly killing FFmpeg processes to allow safe task cancellation.
