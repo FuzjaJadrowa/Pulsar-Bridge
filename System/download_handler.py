@@ -1,5 +1,6 @@
-﻿import yt_dlp
+import yt_dlp
 import json
+from System.ytmusic_search import YTMusicSearchHandler
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
 from System.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
@@ -432,6 +433,25 @@ class SearchHandler:
             return f"{hrs}:{mins:02d}:{secs:02d}"
         return f"{mins:02d}:{secs:02d}"
 
+    @staticmethod
+    def _parse_ytmusic_search(url):
+        if not isinstance(url, str):
+            return None, None
+        lowered = url.lower()
+        if not lowered.startswith("ytmsearch"):
+            return None, None
+        prefix, _, query = url.partition(":")
+        digits = "".join([c for c in prefix if c.isdigit()])
+        limit = None
+        if digits:
+            try:
+                limit = int(digits)
+            except Exception:
+                limit = None
+        if limit is None:
+            limit = 10
+        return query.strip(), max(1, min(limit, 50))
+
     def run(self, args):
         try:
             extra_args = ["--remote-components", "ejs:github"]
@@ -448,6 +468,12 @@ class SearchHandler:
                     "success": False,
                     "error": "No query provided for search"
                 }), flush=True)
+                return
+
+            query, limit = self._parse_ytmusic_search(urls[0])
+            if query is not None:
+                ytm_handler = YTMusicSearchHandler(self.task_id)
+                ytm_handler.run([query, str(limit)])
                 return
 
             override_opts = {

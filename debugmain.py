@@ -4,7 +4,6 @@ import traceback
 from datetime import datetime
 
 from System.download_handler import DownloadHandler, MetadataHandler, SearchHandler
-from System.ytmusic_search import YTMusicSearchHandler
 from System.ffmpeg_popen_patch import kill_processes_for_task
 from System.killable_thread import KillableThread
 
@@ -132,16 +131,6 @@ def main():
                 active_tasks[task_id] = t
                 t.start()
                 _debug(f"SearchHandler started for id={task_id}")
-
-            elif command == "ytmusic_search":
-                if not task_id:
-                    _debug("No ID provided for ytmusic search command.")
-                    continue
-                handler = YTMusicSearchHandler(task_id)
-                t = KillableThread(target=handler.run, args=(args,), daemon=True)
-                active_tasks[task_id] = t
-                t.start()
-                _debug(f"YTMusicSearchHandler started for id={task_id}")
 
             elif command == "cancel":
                 if not task_id:

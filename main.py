@@ -3,7 +3,6 @@ import sys
 import json
 import traceback
 from System.download_handler import DownloadHandler, MetadataHandler, SearchHandler
-from System.ytmusic_search import YTMusicSearchHandler
 from System.ffmpeg_popen_patch import kill_processes_for_task
 from System.killable_thread import KillableThread
 
@@ -58,18 +57,6 @@ def main():
                 args = data.get("args", [])
 
                 handler = SearchHandler(task_id)
-                t = KillableThread(target=handler.run, args=(args,), daemon=True)
-                active_tasks[task_id] = t
-                t.start()
-
-            elif command == "ytmusic_search":
-                if not task_id:
-                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
-                    continue
-
-                args = data.get("args", [])
-
-                handler = YTMusicSearchHandler(task_id)
                 t = KillableThread(target=handler.run, args=(args,), daemon=True)
                 active_tasks[task_id] = t
                 t.start()

@@ -1,5 +1,6 @@
 import json
-
+import os
+import gettext
 
 class YTMusicSearchHandler:
     def __init__(self, task_id):
@@ -76,6 +77,20 @@ class YTMusicSearchHandler:
                 return
 
             limit = self._parse_limit(args[1]) if len(args) > 1 else 10
+
+            os.environ.setdefault("LANGUAGE", "en")
+            os.environ.setdefault("LC_ALL", "en_US.UTF-8")
+            os.environ.setdefault("LANG", "en_US.UTF-8")
+
+            try:
+                _orig_translation = gettext.translation
+
+                def _safe_translation(domain, localedir=None, languages=None, class_=None, fallback=False):
+                    return _orig_translation(domain, localedir=localedir, languages=languages, class_=class_, fallback=True)
+
+                gettext.translation = _safe_translation
+            except Exception:
+                pass
 
             try:
                 from ytmusicapi import YTMusic
