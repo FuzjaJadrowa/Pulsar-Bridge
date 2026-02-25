@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report issue in Pulsar repo!
+    url: https://github.com/FuzjaJadrowa/Pulsar/issues
+    about: If you want to report problem with Pulsar Bridge, use Pulsar issues with tag "comp; bridge/ffmpeg"
