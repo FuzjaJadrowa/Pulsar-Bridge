@@ -2,7 +2,9 @@
 import json
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
-from System.spotify_resolver import resolve_spotify_url
+from System.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
+from System.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
+from System.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
 
 class BridgeLogger:
     def __init__(self, task_id):
@@ -46,6 +48,38 @@ class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 
+    @staticmethod
+    def _parse_int(value):
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _extract_playlist_progress(self, d):
+        info = d.get('info_dict') or {}
+        index = (
+            d.get('playlist_index')
+            or info.get('playlist_index')
+            or info.get('playlist_autonumber')
+        )
+        count = (
+            d.get('playlist_count')
+            or info.get('playlist_count')
+            or info.get('n_entries')
+            or info.get('playlist_size')
+        )
+
+        index = self._parse_int(index)
+        count = self._parse_int(count)
+
+        if index is None and count is None:
+            return 1, 1
+        if index is None and count is not None:
+            index = min(1, count)
+        if count is None and index is not None:
+            count = max(1, index)
+        return index, count
+
     def _progress_hook(self, d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
@@ -55,6 +89,8 @@ class DownloadHandler:
             if total > 0:
                 percent = (downloaded / total) * 100
 
+            item_index, item_count = self._extract_playlist_progress(d)
+
             msg = {
                 "type": "progress",
                 "id": self.task_id,
@@ -62,6 +98,8 @@ class DownloadHandler:
                 "eta": d.get('eta', 0),
                 "speed": d.get('speed', 0),
                 "filename": d.get('filename', ''),
+                "item_index": item_index,
+                "item_count": item_count,
                 "status": "downloading"
             }
             print(json.dumps(msg), flush=True)
@@ -82,7 +120,12 @@ class DownloadHandler:
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 
-            urls = [resolve_spotify_url(u) for u in urls]
+            try:
+                urls = resolve_spotify_for_download(urls)
+                urls = resolve_apple_music_for_download(urls)
+                urls = resolve_deezer_for_download(urls)
+            except AppleMusicUnsupportedError as e:
+                raise Exception(str(e))
 
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []
@@ -135,7 +178,7 @@ class MetadataHandler:
             'upload_date', 'duration', 'duration_string',
             'view_count', 'like_count', 'comment_count',
             'age_limit', 'is_live', 'was_live', 'availability',
-            'channel', 'channel_follower_count', 'webpage_url'
+            'channel', 'channel_follower_count', 'webpage_url', 'spotify', 'apple_music', 'deezer'
         ]
         filtered = {k: info.get(k) for k in keys_to_keep if k in info}
 
@@ -181,7 +224,47 @@ class MetadataHandler:
                 }), flush=True)
                 return
 
-            urls = [resolve_spotify_url(u) for u in urls]
+            spotify_meta = None
+            apple_meta = None
+            deezer_meta = None
+
+            if is_spotify_url(urls[0]):
+                spotify_payload = resolve_spotify_for_metadata(urls[0])
+                if spotify_payload:
+                    spotify_meta = spotify_payload.get("spotify")
+                    resolved = spotify_payload.get("yt_query")
+                    if not resolved and spotify_meta:
+                        artist = (spotify_meta.get("author") or "").strip()
+                        title = (spotify_meta.get("title") or "").strip()
+                        if title or artist:
+                            query = f"{artist} - {title}" if title and artist else (title or artist)
+                            resolved = f"ytsearch1:{query} audio"
+                    if resolved:
+                        urls = [resolved]
+
+            elif is_apple_music_url(urls[0]):
+                apple_payload = resolve_apple_music_for_metadata(urls[0])
+                if apple_payload and apple_payload.get("error"):
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": apple_payload.get("error")
+                    }), flush=True)
+                    return
+                if apple_payload:
+                    apple_meta = apple_payload.get("apple_music")
+                    resolved = apple_payload.get("yt_query")
+                    if resolved:
+                        urls = [resolved]
+
+            elif is_deezer_url(urls[0]):
+                deezer_payload = resolve_deezer_for_metadata(urls[0])
+                if deezer_payload:
+                    deezer_meta = deezer_payload.get("deezer")
+                    resolved = deezer_payload.get("yt_query")
+                    if resolved:
+                        urls = [resolved]
 
             ydl_opts = {
                 'quiet': True,
@@ -218,6 +301,99 @@ class MetadataHandler:
 
                 clean_info = ydl.sanitize_info(info)
                 minimized_info = self._filter_metadata(clean_info)
+
+            if spotify_meta:
+                tracks = spotify_meta.get("tracks") or []
+                primary_track = tracks[0] if tracks else {}
+                title = primary_track.get("title") or spotify_meta.get("title")
+                author = primary_track.get("artist") or spotify_meta.get("author")
+                author_url = spotify_meta.get("author_url")
+                thumbnail = spotify_meta.get("thumbnail")
+                spotify_url = primary_track.get("spotify_url") or spotify_meta.get("url")
+
+                if title:
+                    minimized_info["title"] = title
+                    minimized_info["fulltitle"] = title
+                if author:
+                    minimized_info["uploader"] = author
+                    minimized_info["channel"] = author
+                if author_url:
+                    minimized_info["uploader_url"] = author_url
+                if thumbnail:
+                    minimized_info["thumbnail"] = thumbnail
+                if spotify_url:
+                    minimized_info["webpage_url"] = spotify_url
+                minimized_info["spotify"] = {
+                    "type": spotify_meta.get("type"),
+                    "url": spotify_meta.get("url"),
+                    "title": spotify_meta.get("title"),
+                    "author": spotify_meta.get("author"),
+                    "author_url": author_url,
+                    "thumbnail": thumbnail,
+                    "track_count": len(tracks)
+                }
+
+            if apple_meta:
+                tracks = apple_meta.get("tracks") or []
+                primary_track = tracks[0] if tracks else {}
+                title = primary_track.get("title") or apple_meta.get("title")
+                author = primary_track.get("artist") or apple_meta.get("author")
+                author_url = apple_meta.get("author_url")
+                thumbnail = apple_meta.get("thumbnail")
+                apple_url = primary_track.get("apple_music_url") or apple_meta.get("url")
+
+                if title:
+                    minimized_info["title"] = title
+                    minimized_info["fulltitle"] = title
+                if author:
+                    minimized_info["uploader"] = author
+                    minimized_info["channel"] = author
+                if author_url:
+                    minimized_info["uploader_url"] = author_url
+                if thumbnail:
+                    minimized_info["thumbnail"] = thumbnail
+                if apple_url:
+                    minimized_info["webpage_url"] = apple_url
+                minimized_info["apple_music"] = {
+                    "type": apple_meta.get("type"),
+                    "url": apple_meta.get("url"),
+                    "title": apple_meta.get("title"),
+                    "author": apple_meta.get("author"),
+                    "author_url": author_url,
+                    "thumbnail": thumbnail,
+                    "track_count": len(tracks)
+                }
+
+            if deezer_meta:
+                tracks = deezer_meta.get("tracks") or []
+                primary_track = tracks[0] if tracks else {}
+                title = primary_track.get("title") or deezer_meta.get("title")
+                author = primary_track.get("artist") or deezer_meta.get("author")
+                author_url = deezer_meta.get("author_url")
+                thumbnail = deezer_meta.get("thumbnail")
+                deezer_url = primary_track.get("deezer_url") or deezer_meta.get("url")
+
+                if title:
+                    minimized_info["title"] = title
+                    minimized_info["fulltitle"] = title
+                if author:
+                    minimized_info["uploader"] = author
+                    minimized_info["channel"] = author
+                if author_url:
+                    minimized_info["uploader_url"] = author_url
+                if thumbnail:
+                    minimized_info["thumbnail"] = thumbnail
+                if deezer_url:
+                    minimized_info["webpage_url"] = deezer_url
+                minimized_info["deezer"] = {
+                    "type": deezer_meta.get("type"),
+                    "url": deezer_meta.get("url"),
+                    "title": deezer_meta.get("title"),
+                    "author": deezer_meta.get("author"),
+                    "author_url": author_url,
+                    "thumbnail": thumbnail,
+                    "track_count": len(tracks)
+                }
 
             print(json.dumps({
                 "type": "metadata",
