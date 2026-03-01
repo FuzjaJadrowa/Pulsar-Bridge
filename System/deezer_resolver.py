@@ -5,6 +5,7 @@ import urllib.request
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 _MAX_TRACKS = 200
+_DEEZER_TYPES = {"track", "album", "playlist"}
 
 
 def is_deezer_url(url):
@@ -41,10 +42,38 @@ def _resolve_redirect(url):
         return url
 
 
-def parse_deezer_url(raw_url):
+def _normalize_deezer_path(path):
+    parts = [p for p in str(path or "").split("/") if p]
+    if len(parts) >= 2 and len(parts[0]) == 2 and parts[1] in _DEEZER_TYPES:
+        return parts[1:]
+    return parts
+
+
+def _extract_deezer_url_from_query(parsed):
+    if not parsed:
+        return None
+    qs = urllib.parse.parse_qs(parsed.query)
+    for key in ("dest", "awf", "gwf", "iwf", "url", "u"):
+        raw = qs.get(key, [None])[0]
+        if not raw:
+            continue
+        value = raw
+        for _ in range(2):
+            value = urllib.parse.unquote(value)
+        if "deezer.com" in value:
+            return value
+    return None
+
+
+def parse_deezer_url(raw_url, _seen=None):
     if not raw_url:
         return None
     url = str(raw_url).strip()
+    if _seen is None:
+        _seen = set()
+    if url in _seen:
+        return None
+    _seen.add(url)
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
@@ -52,19 +81,25 @@ def parse_deezer_url(raw_url):
 
     host = (parsed.hostname or "").lower()
     if host.endswith("deezer.page.link") or host.endswith("dzr.page.link") or host.endswith("link.deezer.com") or host.endswith("dzr.fm"):
-        return parse_deezer_url(_resolve_redirect(url))
+        decoded = _extract_deezer_url_from_query(parsed)
+        if decoded:
+            return parse_deezer_url(decoded, _seen)
+        resolved = _resolve_redirect(url)
+        if resolved and resolved != url:
+            return parse_deezer_url(resolved, _seen)
+        return None
 
     if not host.endswith("deezer.com"):
         return None
 
-    parts = [p for p in parsed.path.split("/") if p]
+    parts = _normalize_deezer_path(parsed.path)
     if len(parts) < 2:
         return None
     item_type = parts[0]
     item_id = _extract_trailing_id(parts[1])
     if not item_id:
         return None
-    if item_type not in {"track", "album", "playlist"}:
+    if item_type not in _DEEZER_TYPES:
         return None
     return {"type": item_type, "id": item_id, "url": url}
 
@@ -210,9 +245,11 @@ def resolve_deezer_for_metadata(url):
     if not is_deezer_url(url):
         return None
     parsed = parse_deezer_url(url)
+    if not parsed:
+        return {"error": "unsupported link"}
     payload = _build_payload(parsed)
     if not payload:
-        return None
+        return {"error": "unsupported link"}
     queries = build_youtube_queries(payload)
     return {
         "deezer": payload,

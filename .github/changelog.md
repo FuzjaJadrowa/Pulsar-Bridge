@@ -1,3 +1,4 @@
-# Build 12
-- Fixed support for YT Music using `ytmusicapi`
-- Unified search for `yt_search` to `search`
+# Build 13
+- Fixed support for all Deezer links.
+- Fixed playlist name return for Spotify, Apple Music and Deezer.
+- Fixed error logging in final JSON.

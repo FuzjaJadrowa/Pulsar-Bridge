@@ -11,6 +11,8 @@ class BridgeLogger:
     def __init__(self, task_id):
         self.task_id = task_id
         self.ffmpeg_parser = FFMpegOutputParser()
+        self.last_error = None
+        self.last_warning = None
 
     def debug(self, msg):
         ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
@@ -29,6 +31,7 @@ class BridgeLogger:
         pass
 
     def warning(self, msg):
+        self.last_warning = msg
         print(json.dumps({
             "type": "log",
             "level": "warning",
@@ -37,6 +40,7 @@ class BridgeLogger:
         }), flush=True)
 
     def error(self, msg):
+        self.last_error = msg
         print(json.dumps({
             "type": "log",
             "level": "error",
@@ -48,6 +52,8 @@ class BridgeLogger:
 class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
+        self.expected_playlist_count = None
+        self.current_playlist_index = 1
 
     @staticmethod
     def _parse_int(value):
@@ -73,6 +79,8 @@ class DownloadHandler:
         index = self._parse_int(index)
         count = self._parse_int(count)
 
+        if index is None and count is None and self.expected_playlist_count:
+            return self.current_playlist_index, self.expected_playlist_count
         if index is None and count is None:
             return 1, 1
         if index is None and count is not None:
@@ -111,8 +119,11 @@ class DownloadHandler:
                 "id": self.task_id,
                 "msg": "File downloaded, starting post-processing..."
             }), flush=True)
+            if self.expected_playlist_count and self.current_playlist_index < self.expected_playlist_count:
+                self.current_playlist_index += 1
 
     def run(self, args_list):
+        logger = BridgeLogger(self.task_id)
         try:
             extra_args = ["--remote-components", "ejs:github"]
             final_args = extra_args + args_list
@@ -120,6 +131,7 @@ class DownloadHandler:
             parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
+            original_urls = list(urls)
 
             try:
                 urls = resolve_spotify_for_download(urls)
@@ -128,11 +140,19 @@ class DownloadHandler:
             except AppleMusicUnsupportedError as e:
                 raise Exception(str(e))
 
+            expanded_from_non_yt = any(
+                is_spotify_url(u) or is_apple_music_url(u) or is_deezer_url(u)
+                for u in original_urls
+            )
+            if expanded_from_non_yt and len(urls) > 1:
+                self.expected_playlist_count = len(urls)
+                self.current_playlist_index = 1
+
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []
             ydl_opts['progress_hooks'].append(self._progress_hook)
 
-            ydl_opts['logger'] = BridgeLogger(self.task_id)
+            ydl_opts['logger'] = logger
             ydl_opts['no_color'] = True
             ydl_opts['ignoreerrors'] = False
 
@@ -157,7 +177,7 @@ class DownloadHandler:
                 "error": "Cancelled"
             }), flush=True)
         except Exception as e:
-            error_msg = str(e)
+            error_msg = logger.last_error or str(e)
             if "yt-dlp exited with error code" in error_msg:
                 error_msg = "Download failed."
 
@@ -172,7 +192,7 @@ class MetadataHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 
-    def _filter_metadata(self, info):
+    def _filter_metadata(self, info, force_subtitle_langs=False):
         keys_to_keep = [
             'id', 'title', 'fulltitle', 'thumbnail', 'description',
             'uploader', 'uploader_id', 'uploader_url',
@@ -201,13 +221,62 @@ class MetadataHandler:
 
         if 'subtitles' in info and info['subtitles']:
             filtered['subtitles_langs'] = list(info['subtitles'].keys())
+        elif force_subtitle_langs:
+            filtered['subtitles_langs'] = []
 
         if 'automatic_captions' in info and info['automatic_captions']:
             filtered['auto_captions_langs'] = list(info['automatic_captions'].keys())
+        elif force_subtitle_langs:
+            filtered['auto_captions_langs'] = []
 
         return filtered
 
+    @staticmethod
+    def _build_youtube_url(entry):
+        if not entry:
+            return None
+        url = entry.get('webpage_url') or entry.get('url')
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+        video_id = entry.get('id') if isinstance(entry, dict) else None
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+        return None
+
+    def _ensure_full_info(self, ydl, info):
+        if not info:
+            return info
+
+        if info.get('_type') == 'playlist' and info.get('entries'):
+            first = next((e for e in info['entries'] if e), None)
+            if not first:
+                return info
+            if isinstance(first, dict):
+                if first.get('_type') in ('url', 'url_transparent') or (
+                    not first.get('subtitles') and not first.get('automatic_captions')
+                ):
+                    url = self._build_youtube_url(first)
+                    if url:
+                        try:
+                            return ydl.extract_info(url, download=False)
+                        except Exception:
+                            return first
+            return first
+
+        if info.get('_type') in ('url', 'url_transparent') or (
+            not info.get('subtitles') and not info.get('automatic_captions')
+        ):
+            url = self._build_youtube_url(info)
+            if url:
+                try:
+                    return ydl.extract_info(url, download=False)
+                except Exception:
+                    return info
+
+        return info
+
     def run(self, args):
+        logger = BridgeLogger(self.task_id)
         try:
             extra_args = ["--remote-components", "ejs:github"]
             final_args = extra_args + args
@@ -228,24 +297,49 @@ class MetadataHandler:
             spotify_meta = None
             apple_meta = None
             deezer_meta = None
+            force_subs_output = False
 
             if is_spotify_url(urls[0]):
                 spotify_payload = resolve_spotify_for_metadata(urls[0])
-                if spotify_payload:
-                    spotify_meta = spotify_payload.get("spotify")
-                    resolved = spotify_payload.get("yt_query")
-                    if not resolved and spotify_meta:
-                        artist = (spotify_meta.get("author") or "").strip()
-                        title = (spotify_meta.get("title") or "").strip()
-                        if title or artist:
-                            query = f"{artist} - {title}" if title and artist else (title or artist)
-                            resolved = f"ytsearch1:{query} audio"
-                    if resolved:
-                        urls = [resolved]
+                if not spotify_payload:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unsupported link"
+                    }), flush=True)
+                    return
+                spotify_meta = spotify_payload.get("spotify")
+                resolved = spotify_payload.get("yt_query")
+                if not resolved and spotify_meta:
+                    artist = (spotify_meta.get("author") or "").strip()
+                    title = (spotify_meta.get("title") or "").strip()
+                    if title or artist:
+                        query = f"{artist} - {title}" if title and artist else (title or artist)
+                        resolved = f"ytsearch1:{query} audio"
+                if resolved:
+                    urls = [resolved]
+                else:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unable to resolve youtube query"
+                    }), flush=True)
+                    return
+                force_subs_output = True
 
             elif is_apple_music_url(urls[0]):
                 apple_payload = resolve_apple_music_for_metadata(urls[0])
-                if apple_payload and apple_payload.get("error"):
+                if not apple_payload:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unsupported link"
+                    }), flush=True)
+                    return
+                if apple_payload.get("error"):
                     print(json.dumps({
                         "type": "finished",
                         "id": self.task_id,
@@ -253,27 +347,61 @@ class MetadataHandler:
                         "error": apple_payload.get("error")
                     }), flush=True)
                     return
-                if apple_payload:
-                    apple_meta = apple_payload.get("apple_music")
-                    resolved = apple_payload.get("yt_query")
-                    if resolved:
-                        urls = [resolved]
+                apple_meta = apple_payload.get("apple_music")
+                resolved = apple_payload.get("yt_query")
+                if resolved:
+                    urls = [resolved]
+                else:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unable to resolve youtube query"
+                    }), flush=True)
+                    return
+                force_subs_output = True
 
             elif is_deezer_url(urls[0]):
                 deezer_payload = resolve_deezer_for_metadata(urls[0])
-                if deezer_payload:
-                    deezer_meta = deezer_payload.get("deezer")
-                    resolved = deezer_payload.get("yt_query")
-                    if resolved:
-                        urls = [resolved]
+                if not deezer_payload:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unsupported link"
+                    }), flush=True)
+                    return
+                if deezer_payload.get("error"):
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": deezer_payload.get("error")
+                    }), flush=True)
+                    return
+                deezer_meta = deezer_payload.get("deezer")
+                resolved = deezer_payload.get("yt_query")
+                if resolved:
+                    urls = [resolved]
+                else:
+                    print(json.dumps({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "unable to resolve youtube query"
+                    }), flush=True)
+                    return
+                force_subs_output = True
 
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
-                'logger': BridgeLogger(self.task_id),
+                'logger': logger,
                 'simulate': True,
                 'skip_download': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
                 **ydl_opts,
             }
 
@@ -288,7 +416,10 @@ class MetadataHandler:
                         'no_warnings': True,
                         'simulate': True,
                         'skip_download': True,
-                        'logger': BridgeLogger(self.task_id)
+                        'logger': logger,
+                        'extract_flat': False,
+                        'writesubtitles': True,
+                        'writeautomaticsub': True
                     })
                 except Exception as e:
                     print(json.dumps({"type": "error", "message": f"Args error: {str(e)}"}), flush=True)
@@ -297,20 +428,29 @@ class MetadataHandler:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(urls[0], download=False)
 
-                if info and info.get('_type') == 'playlist' and info.get('entries'):
-                    info = info['entries'][0]
+                info = self._ensure_full_info(ydl, info)
+                if not info:
+                    raise Exception("No metadata extracted")
 
                 clean_info = ydl.sanitize_info(info)
-                minimized_info = self._filter_metadata(clean_info)
+                minimized_info = self._filter_metadata(clean_info, force_subtitle_langs=force_subs_output)
 
             if spotify_meta:
                 tracks = spotify_meta.get("tracks") or []
                 primary_track = tracks[0] if tracks else {}
-                title = primary_track.get("title") or spotify_meta.get("title")
-                author = primary_track.get("artist") or spotify_meta.get("author")
+                meta_type = (spotify_meta.get("type") or "").lower()
+                if meta_type in ("playlist", "album", "artist", "show"):
+                    title = spotify_meta.get("title")
+                    author = spotify_meta.get("author")
+                else:
+                    title = primary_track.get("title") or spotify_meta.get("title")
+                    author = primary_track.get("artist") or spotify_meta.get("author")
                 author_url = spotify_meta.get("author_url")
                 thumbnail = spotify_meta.get("thumbnail")
-                spotify_url = primary_track.get("spotify_url") or spotify_meta.get("url")
+                if meta_type in ("playlist", "album", "artist", "show"):
+                    spotify_url = spotify_meta.get("url")
+                else:
+                    spotify_url = primary_track.get("spotify_url") or spotify_meta.get("url")
 
                 if title:
                     minimized_info["title"] = title
@@ -337,11 +477,19 @@ class MetadataHandler:
             if apple_meta:
                 tracks = apple_meta.get("tracks") or []
                 primary_track = tracks[0] if tracks else {}
-                title = primary_track.get("title") or apple_meta.get("title")
-                author = primary_track.get("artist") or apple_meta.get("author")
+                meta_type = (apple_meta.get("type") or "").lower()
+                if meta_type in ("album", "playlist", "artist"):
+                    title = apple_meta.get("title")
+                    author = apple_meta.get("author")
+                else:
+                    title = primary_track.get("title") or apple_meta.get("title")
+                    author = primary_track.get("artist") or apple_meta.get("author")
                 author_url = apple_meta.get("author_url")
                 thumbnail = apple_meta.get("thumbnail")
-                apple_url = primary_track.get("apple_music_url") or apple_meta.get("url")
+                if meta_type in ("album", "playlist", "artist"):
+                    apple_url = apple_meta.get("url")
+                else:
+                    apple_url = primary_track.get("apple_music_url") or apple_meta.get("url")
 
                 if title:
                     minimized_info["title"] = title
@@ -368,11 +516,19 @@ class MetadataHandler:
             if deezer_meta:
                 tracks = deezer_meta.get("tracks") or []
                 primary_track = tracks[0] if tracks else {}
-                title = primary_track.get("title") or deezer_meta.get("title")
-                author = primary_track.get("artist") or deezer_meta.get("author")
+                meta_type = (deezer_meta.get("type") or "").lower()
+                if meta_type in ("album", "playlist", "artist"):
+                    title = deezer_meta.get("title")
+                    author = deezer_meta.get("author")
+                else:
+                    title = primary_track.get("title") or deezer_meta.get("title")
+                    author = primary_track.get("artist") or deezer_meta.get("author")
                 author_url = deezer_meta.get("author_url")
                 thumbnail = deezer_meta.get("thumbnail")
-                deezer_url = primary_track.get("deezer_url") or deezer_meta.get("url")
+                if meta_type in ("album", "playlist", "artist"):
+                    deezer_url = deezer_meta.get("url")
+                else:
+                    deezer_url = primary_track.get("deezer_url") or deezer_meta.get("url")
 
                 if title:
                     minimized_info["title"] = title
@@ -408,7 +564,7 @@ class MetadataHandler:
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": logger.last_error or str(e)
             }), flush=True)
 
 
@@ -453,6 +609,7 @@ class SearchHandler:
         return query.strip(), max(1, min(limit, 50))
 
     def run(self, args):
+        logger = BridgeLogger(self.task_id)
         try:
             extra_args = ["--remote-components", "ejs:github"]
             final_args = extra_args + args
@@ -480,7 +637,7 @@ class SearchHandler:
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': True,
-                'logger': BridgeLogger(self.task_id),
+                'logger': logger,
                 'simulate': True,
                 'skip_download': True,
             }
@@ -525,5 +682,5 @@ class SearchHandler:
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": logger.last_error or str(e)
             }), flush=True)
