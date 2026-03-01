@@ -1,4 +1,2 @@
-# Build 13
-- Fixed support for all Deezer links.
-- Fixed playlist name return for Spotify, Apple Music and Deezer.
-- Fixed error logging in final JSON.
+# Build 14
+- Bumped yt-dlp version to `2026.2.21`.
