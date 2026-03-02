@@ -275,6 +275,15 @@ class MetadataHandler:
 
         return info
 
+    @staticmethod
+    def _is_youtube_playlist_url(url):
+        if not isinstance(url, str):
+            return False
+        lowered = url.lower()
+        if "list=" not in lowered:
+            return False
+        return ("youtube.com" in lowered) or ("youtu.be" in lowered) or ("music.youtube.com" in lowered)
+
     def run(self, args):
         logger = BridgeLogger(self.task_id)
         try:
@@ -424,6 +433,11 @@ class MetadataHandler:
                 except Exception as e:
                     print(json.dumps({"type": "error", "message": f"Args error: {str(e)}"}), flush=True)
                     return
+
+            if self._is_youtube_playlist_url(urls[0]):
+                ydl_opts['extract_flat'] = 'in_playlist'
+                ydl_opts['playlistend'] = 1
+                ydl_opts['playlist_items'] = '1'
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(urls[0], download=False)
