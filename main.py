@@ -4,6 +4,7 @@ import traceback
 import threading
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import kill_processes_for_task
+from System.ffmpeg_runner import kill_all_ffmpeg
 from System.killable_thread import KillableThread
 
 active_tasks = {}
@@ -151,6 +152,13 @@ def main():
                     emit_json({"type": "error", "message": "Task not found"})
 
             elif command == "exit":
+                for active_id in list(active_tasks.keys()):
+                    kill_processes_for_task(active_id)
+                    thread = active_tasks.get(active_id)
+                    if thread and thread.is_alive():
+                        thread.terminate()
+                    active_tasks.pop(active_id, None)
+                kill_all_ffmpeg()
                 sys.exit(0)
 
         except json.JSONDecodeError:

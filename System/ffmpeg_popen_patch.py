@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 import yt_dlp.downloader.external as yt_external
 from System.ffmpeg_output_parser import FFMpegOutputParser
+from System.ffmpeg_runner import kill_ffmpeg_for_task
 
 _active_popens = {}
 
@@ -18,6 +19,7 @@ def kill_processes_for_task(task_id):
             pass
     if task_id in _active_popens:
         del _active_popens[task_id]
+    kill_ffmpeg_for_task(task_id)
 
 @contextmanager
 def patch_ffmpeg_popen_for_progress(task_id):
