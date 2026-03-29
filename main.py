@@ -1,12 +1,56 @@
-import os
 import sys
 import json
 import traceback
-from System.download_handler import DownloadHandler, MetadataHandler, SearchHandler
+import threading
+from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import kill_processes_for_task
 from System.killable_thread import KillableThread
 
 active_tasks = {}
+
+def emit_json(payload):
+    print(json.dumps(payload), flush=True)
+
+class BridgeLogger:
+    def __init__(self, task_id):
+        self.task_id = task_id
+        self.ffmpeg_parser = FFMpegOutputParser()
+        self.last_error = None
+        self.last_warning = None
+
+    def debug(self, msg):
+        ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
+        if ffmpeg_data:
+            payload = {
+                "type": "progress_ffmpeg",
+                "id": self.task_id,
+                "status": "processing"
+            }
+            payload.update(ffmpeg_data)
+            emit_json(payload)
+        elif not msg.startswith('[download] '):
+            pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        self.last_warning = msg
+        emit_json({
+            "type": "log",
+            "level": "warning",
+            "id": self.task_id,
+            "message": msg
+        })
+
+    def error(self, msg):
+        self.last_error = msg
+        emit_json({
+            "type": "log",
+            "level": "error",
+            "id": self.task_id,
+            "message": msg
+        })
 
 def main():
     if sys.platform == "win32":
@@ -14,7 +58,10 @@ def main():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
         sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 
-    print(json.dumps({"type": "ready", "message": "Bridge is ready"}), flush=True)
+    from System.download_handler import DownloadHandler, DownloadMetadataHandler, SearchHandler
+    from System.convert_handler import ConvertMetadataHandler, ConvertHandler
+
+    emit_json({"type": "ready", "message": "Bridge is ready"})
 
     for line in sys.stdin:
         try:
@@ -27,7 +74,7 @@ def main():
 
             if command == "download":
                 if not task_id:
-                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
+                    emit_json({"type": "error", "message": "No ID provided"})
                     continue
 
                 args = data.get("args", [])
@@ -36,22 +83,54 @@ def main():
                 active_tasks[task_id] = t
                 t.start()
 
-
-            elif command == "metadata":
+            elif command == "metadata_d":
                 if not task_id:
-                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
+                    emit_json({"type": "error", "message": "No ID provided"})
                     continue
 
                 args = data.get("args", [])
+                handler = DownloadMetadataHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args,), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
 
-                handler = MetadataHandler(task_id)
+            elif command == "metadata_c":
+                if not task_id:
+                    emit_json({"type": "error", "message": "No ID provided"})
+                    continue
+
+                args = data.get("args", [])
+                handler = ConvertMetadataHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args,), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
+
+            elif command == "convert":
+                if not task_id:
+                    emit_json({"type": "error", "message": "No ID provided"})
+                    continue
+
+                args = data.get("args", [])
+                payload = data.get("payload", None)
+                handler = ConvertHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args, payload), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
+
+            elif command == "metadata":
+                if not task_id:
+                    emit_json({"type": "error", "message": "No ID provided"})
+                    continue
+
+                args = data.get("args", [])
+                handler = DownloadMetadataHandler(task_id)
                 t = KillableThread(target=handler.run, args=(args,), daemon=True)
                 active_tasks[task_id] = t
                 t.start()
 
             elif command == "search":
                 if not task_id:
-                    print(json.dumps({"type": "error", "message": "No ID provided"}), flush=True)
+                    emit_json({"type": "error", "message": "No ID provided"})
                     continue
 
                 args = data.get("args", [])
@@ -67,18 +146,18 @@ def main():
                 if thread.is_alive():
                     thread.terminate()
                     del active_tasks[task_id]
-                    print(json.dumps({"type": "cancelled", "id": task_id}), flush=True)
+                    emit_json({"type": "cancelled", "id": task_id})
                 else:
-                    print(json.dumps({"type": "error", "message": "Task not found"}), flush=True)
+                    emit_json({"type": "error", "message": "Task not found"})
 
             elif command == "exit":
                 sys.exit(0)
 
         except json.JSONDecodeError:
-            print(json.dumps({"type": "error", "message": "Invalid JSON"}), flush=True)
+            emit_json({"type": "error", "message": "Invalid JSON"})
         except Exception as e:
             msg = f"Global Error: {str(e)}\n{traceback.format_exc()}"
-            print(json.dumps({"type": "error", "message": msg}), flush=True)
+            emit_json({"type": "error", "message": msg})
 
 if __name__ == "__main__":
     main()

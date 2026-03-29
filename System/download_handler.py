@@ -1,52 +1,11 @@
 import yt_dlp
 import json
-from System.ytmusic_search import YTMusicSearchHandler
-from System.ffmpeg_output_parser import FFMpegOutputParser
+from Download.ytmusic_search import YTMusicSearchHandler
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
-from System.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
-from System.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
-from System.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
-
-class BridgeLogger:
-    def __init__(self, task_id):
-        self.task_id = task_id
-        self.ffmpeg_parser = FFMpegOutputParser()
-        self.last_error = None
-        self.last_warning = None
-
-    def debug(self, msg):
-        ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
-        if ffmpeg_data:
-            payload = {
-                "type": "progress_ffmpeg",
-                "id": self.task_id,
-                "status": "processing"
-            }
-            payload.update(ffmpeg_data)
-            print(json.dumps(payload), flush=True)
-        elif not msg.startswith('[download] '):
-            pass
-
-    def info(self, msg):
-        pass
-
-    def warning(self, msg):
-        self.last_warning = msg
-        print(json.dumps({
-            "type": "log",
-            "level": "warning",
-            "id": self.task_id,
-            "message": msg
-        }), flush=True)
-
-    def error(self, msg):
-        self.last_error = msg
-        print(json.dumps({
-            "type": "log",
-            "level": "error",
-            "id": self.task_id,
-            "message": msg
-        }), flush=True)
+from Download.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
+from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
+from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
+from main import BridgeLogger
 
 
 class DownloadHandler:
@@ -188,7 +147,7 @@ class DownloadHandler:
                 "error": error_msg
             }), flush=True)
 
-class MetadataHandler:
+class DownloadMetadataHandler:
     def __init__(self, task_id):
         self.task_id = task_id
 

@@ -1,5 +1,5 @@
 .idea
 .venv
-bridge.spec
+*.spec
 build
 dist
