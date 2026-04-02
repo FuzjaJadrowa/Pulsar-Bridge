@@ -53,7 +53,9 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
         stdin=subprocess.DEVNULL,
         text=True,
         bufsize=1,
-        universal_newlines=True
+        universal_newlines=True,
+        encoding="utf-8",
+        errors="replace"
     )
     if not register_ffmpeg(task_id, proc):
         proc.kill()

@@ -61,6 +61,7 @@ def main():
 
     from System.download_handler import DownloadHandler, DownloadMetadataHandler, SearchHandler
     from System.convert_handler import ConvertMetadataHandler, ConvertHandler
+    from System.compress_handler import CompressHandler
 
     emit_json({"type": "ready", "message": "Bridge is ready"})
 
@@ -106,6 +107,18 @@ def main():
                 active_tasks[task_id] = t
                 t.start()
 
+            # to delete in future
+            elif command == "metadata":
+                if not task_id:
+                    emit_json({"type": "error", "message": "No ID provided"})
+                    continue
+
+                args = data.get("args", [])
+                handler = DownloadMetadataHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args,), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
+
             elif command == "convert":
                 if not task_id:
                     emit_json({"type": "error", "message": "No ID provided"})
@@ -114,6 +127,18 @@ def main():
                 args = data.get("args", [])
                 payload = data.get("payload", None)
                 handler = ConvertHandler(task_id)
+                t = KillableThread(target=handler.run, args=(args, payload), daemon=True)
+                active_tasks[task_id] = t
+                t.start()
+
+            elif command == "compress":
+                if not task_id:
+                    emit_json({"type": "error", "message": "No ID provided"})
+                    continue
+
+                args = data.get("args", [])
+                payload = data.get("payload", None)
+                handler = CompressHandler(task_id)
                 t = KillableThread(target=handler.run, args=(args, payload), daemon=True)
                 active_tasks[task_id] = t
                 t.start()
