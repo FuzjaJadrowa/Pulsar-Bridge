@@ -5,6 +5,7 @@ from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
 from Download.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
 from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
 from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
+from System.custom_extractor import extract_custom_stream_url, is_direct_media_url
 from main import BridgeLogger
 
 
@@ -106,6 +107,18 @@ class DownloadHandler:
             if expanded_from_non_yt and len(urls) > 1:
                 self.expected_playlist_count = len(urls)
                 self.current_playlist_index = 1
+
+            extracted_urls = []
+            for url in urls:
+                if not isinstance(url, str) or not url.startswith("http") or is_direct_media_url(url):
+                    extracted_urls.append(url)
+                    continue
+                try:
+                    resolved_url = extract_custom_stream_url(url)
+                    extracted_urls.append(resolved_url)
+                except Exception:
+                    extracted_urls.append(url)
+            urls = extracted_urls
 
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []

@@ -1,3 +1,2 @@
-# Build 17
-- Added rate limiter.
-- Deleted support for unsupported formats by FFmpeg.
+# Build 18
+- Added custom yt-dlp extractor using `playwright`.
