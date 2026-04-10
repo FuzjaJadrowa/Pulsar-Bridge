@@ -2,12 +2,82 @@ import sys
 import json
 import traceback
 import threading
+import time
 from System.ffmpeg_output_parser import FFMpegOutputParser
 from System.ffmpeg_popen_patch import kill_processes_for_task
 from System.ffmpeg_runner import kill_all_ffmpeg
 from System.killable_thread import KillableThread
 
 active_tasks = {}
+
+class RateLimitedStdout:
+    def __init__(self, stream, min_interval=0.4, throttled_types=None):
+        self.stream = stream
+        self.min_interval = float(min_interval)
+        self.throttled_types = set(throttled_types or ())
+        self.buffer = ""
+        self.lock = threading.Lock()
+        self.next_allowed = {}
+
+    def _should_throttle(self, payload):
+        task_id = payload.get("id")
+        if not task_id:
+            return False
+        msg_type = payload.get("type")
+        if msg_type not in self.throttled_types:
+            return False
+        if msg_type == "log" and str(payload.get("level", "")).lower() == "error":
+            return False
+        now = time.monotonic()
+        next_allowed = self.next_allowed.get(task_id, 0.0)
+        if now < next_allowed:
+            return True
+        self.next_allowed[task_id] = now + self.min_interval
+        return False
+
+    def write(self, data):
+        if not data:
+            return 0
+        with self.lock:
+            self.buffer += data
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                if line == "":
+                    self.stream.write("\n")
+                    continue
+                payload = None
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    payload = None
+                if payload and self._should_throttle(payload):
+                    continue
+                self.stream.write(line + "\n")
+            self.stream.flush()
+        return len(data)
+
+    def flush(self):
+        with self.lock:
+            if self.buffer:
+                payload = None
+                try:
+                    payload = json.loads(self.buffer)
+                except Exception:
+                    payload = None
+                if not (payload and self._should_throttle(payload)):
+                    self.stream.write(self.buffer)
+                self.buffer = ""
+            self.stream.flush()
+
+    def isatty(self):
+        if hasattr(self.stream, "isatty"):
+            return self.stream.isatty()
+        return False
+
+    def writable(self):
+        if hasattr(self.stream, "writable"):
+            return self.stream.writable()
+        return True
 
 def emit_json(payload):
     print(json.dumps(payload), flush=True)
@@ -58,6 +128,7 @@ def main():
         import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
         sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+    sys.stdout = RateLimitedStdout(sys.stdout, min_interval=0.4, throttled_types={"progress", "progress_ffmpeg", "log"})
 
     from System.download_handler import DownloadHandler, DownloadMetadataHandler, SearchHandler
     from System.convert_handler import ConvertMetadataHandler, ConvertHandler

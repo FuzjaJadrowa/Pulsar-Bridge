@@ -53,11 +53,11 @@ from System.ffmpeg_runner import run_ffmpeg_with_progress
 
 
 VIDEO_EXTENSIONS = {
-    "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "ogm", "ogv", "ogx", "ts", "vob", "webm", "wmv"
+    "avi", "flv", "m4v", "mkv", "mov", "mp4", "ogm", "ogv", "ogx", "ts", "vob", "webm", "wmv"
 }
 
 AUDIO_EXTENSIONS = {
-    "aac", "aiff", "alac", "flac", "m4a", "midi", "mp3", "oga", "ogg", "opus", "wav", "weba", "wma"
+    "aac", "aiff", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "wma"
 }
 
 IMAGE_EXTENSIONS = {
