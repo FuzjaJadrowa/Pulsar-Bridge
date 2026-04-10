@@ -5,7 +5,7 @@ from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
 from Download.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
 from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
 from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
-from System.custom_extractor import extract_custom_stream_url, is_direct_media_url
+from Download.custom_extractor import extract_custom_stream_url, is_direct_media_url
 from main import BridgeLogger
 
 
