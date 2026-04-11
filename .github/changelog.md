@@ -1,2 +1,2 @@
-# Build 18
-- Added custom yt-dlp extractor using `playwright`.
+# Build 19
+- Removed custom yt-dlp extractor. Probably will readd in the future.

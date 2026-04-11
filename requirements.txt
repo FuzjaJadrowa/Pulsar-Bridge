@@ -9,4 +9,3 @@ rarfile==4.2
 fonttools==4.62.1
 brotli==1.2.0
 better-ffmpeg-progress==4.0.1
-playwright==1.55.0
