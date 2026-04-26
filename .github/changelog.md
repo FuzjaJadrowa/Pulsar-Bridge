@@ -1,2 +1,2 @@
-# Build 19
-- Removed custom yt-dlp extractor. Probably will readd in the future.
+# Build 20
+- Bump yt-dlp version to master version.
