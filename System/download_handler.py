@@ -6,6 +6,8 @@ from Download.spotify_resolver import resolve_spotify_for_download, resolve_spot
 from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
 from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
 from main import BridgeLogger
+from System.utils import emit_json
+
 
 
 class DownloadHandler:
@@ -53,31 +55,37 @@ class DownloadHandler:
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
             downloaded = d.get('downloaded_bytes', 0)
 
-            percent = 0
+            percent = 0.0
             if total > 0:
                 percent = (downloaded / total) * 100
+            elif d.get('fragment_count') and d.get('fragment_index'):
+                percent = (d['fragment_index'] / d['fragment_count']) * 100
 
             item_index, item_count = self._extract_playlist_progress(d)
+            eta = d.get('eta')
+            if eta is None:
+                eta = 0
 
             msg = {
                 "type": "progress",
                 "id": self.task_id,
-                "percent": percent,
-                "eta": d.get('eta', 0),
-                "speed": d.get('speed', 0),
+                "percent": round(percent, 2),
+                "eta": eta,
+                "eta_seconds": eta,
+                "speed": d.get('speed', 0) or 0,
                 "filename": d.get('filename', ''),
                 "item_index": item_index,
                 "item_count": item_count,
                 "status": "downloading"
             }
-            print(json.dumps(msg), flush=True)
+            emit_json(msg)
 
         elif d['status'] == 'finished':
-            print(json.dumps({
+            emit_json({
                 "type": "status",
                 "id": self.task_id,
                 "msg": "File downloaded, starting post-processing..."
-            }), flush=True)
+            })
             if self.expected_playlist_count and self.current_playlist_index < self.expected_playlist_count:
                 self.current_playlist_index += 1
 
@@ -122,30 +130,30 @@ class DownloadHandler:
             if retcode != 0:
                 raise Exception(f"yt-dlp exited with error code {retcode}")
 
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": True
-            }), flush=True)
+            })
 
         except SystemExit:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": "Cancelled"
-            }), flush=True)
+            })
         except Exception as e:
             error_msg = logger.last_error or str(e)
             if "yt-dlp exited with error code" in error_msg:
                 error_msg = "Download failed."
 
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": error_msg
-            }), flush=True)
+            })
 
 class DownloadMetadataHandler:
     def __init__(self, task_id):
@@ -390,7 +398,7 @@ class DownloadMetadataHandler:
                         'writeautomaticsub': True
                     })
                 except Exception as e:
-                    print(json.dumps({"type": "error", "message": f"Args error: {str(e)}"}), flush=True)
+                    emit_json({"type": "finished", "id": self.task_id, "success": False, "error": f"Args error: {str(e)}"})
                     return
 
             if self._is_youtube_playlist_url(urls[0]):
@@ -532,6 +540,13 @@ class DownloadMetadataHandler:
                 "data": minimized_info
             }), flush=True)
 
+        except SystemExit:
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": "Cancelled"
+            }), flush=True)
         except Exception as e:
             print(json.dumps({
                 "type": "finished",
@@ -650,6 +665,13 @@ class SearchHandler:
                 "data": results
             }), flush=True)
 
+        except SystemExit:
+            print(json.dumps({
+                "type": "finished",
+                "id": self.task_id,
+                "success": False,
+                "error": "Cancelled"
+            }), flush=True)
         except Exception as e:
             print(json.dumps({
                 "type": "finished",

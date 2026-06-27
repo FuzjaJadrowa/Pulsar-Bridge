@@ -1,7 +1,7 @@
-import json
 import subprocess
 import threading
 import time
+from System.utils import emit_json
 
 try:
     from better_ffmpeg_progress import FFMpegProgress as _FFMpegProgress
@@ -9,15 +9,18 @@ except Exception:
     _FFMpegProgress = None
 
 _active_ffmpeg = {}
+_ffmpeg_lock = threading.Lock()
 
 def register_ffmpeg(task_id, process):
     if not task_id or process is None:
         return False
-    _active_ffmpeg[task_id] = process
+    with _ffmpeg_lock:
+        _active_ffmpeg[task_id] = process
     return True
 
 def kill_ffmpeg_for_task(task_id):
-    proc = _active_ffmpeg.pop(task_id, None)
+    with _ffmpeg_lock:
+        proc = _active_ffmpeg.pop(task_id, None)
     if not proc:
         return
     try:
@@ -26,15 +29,14 @@ def kill_ffmpeg_for_task(task_id):
         pass
 
 def kill_all_ffmpeg():
-    for task_id, proc in list(_active_ffmpeg.items()):
+    with _ffmpeg_lock:
+        items = list(_active_ffmpeg.items())
+        _active_ffmpeg.clear()
+    for task_id, proc in items:
         try:
             proc.kill()
         except Exception:
             pass
-        _active_ffmpeg.pop(task_id, None)
-
-def _emit(payload):
-    print(json.dumps(payload), flush=True)
 
 def _parse_progress_line(line):
     data = {}

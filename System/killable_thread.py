@@ -7,24 +7,25 @@ def _async_raise(tid, exctype):
         raise TypeError("Only types can be raised (not instances)")
     res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), ctypes.py_object(exctype))
     if res == 0:
-        raise ValueError("invalid thread id")
+        return3
     elif res != 1:
         ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(tid), None)
-        raise SystemError("PyThreadState_SetAsyncExc failed")
 
 class KillableThread(threading.Thread):
     def _get_my_tid(self):
         if not self.is_alive():
             return None
-        if hasattr(self, "_thread_id"):
-            return self._thread_id
-        for tid, tobj in threading._active.items():
+        if getattr(self, "ident", None) is not None:
+            return self.ident
+        for tid, tobj in list(threading._active.items()):
             if tobj is self:
-                self._thread_id = tid
                 return tid
         return None
 
     def terminate(self):
         tid = self._get_my_tid()
         if tid:
-            _async_raise(tid, SystemExit)
+            try:
+                _async_raise(tid, SystemExit)
+            except Exception:
+                pass

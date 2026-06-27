@@ -50,82 +50,11 @@ except Exception:
     brotli = None
 
 from System.ffmpeg_runner import run_ffmpeg_with_progress
+from System.utils import emit_json, ProgressEmitter, parse_time_to_seconds, resolve_progress_percent, is_safe_path
 
+_emit = emit_json
+_ProgressEmitter = ProgressEmitter
 
-VIDEO_EXTENSIONS = {
-    "avi", "flv", "m4v", "mkv", "mov", "mp4", "ogm", "ogv", "ogx", "ts", "vob", "webm", "wmv"
-}
-
-AUDIO_EXTENSIONS = {
-    "aac", "aiff", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "wma"
-}
-
-IMAGE_EXTENSIONS = {
-    "avif", "bmp", "gif", "heic", "heif", "ico", "jfif", "jpe", "jpeg",
-    "jpg", "png", "svg", "tga", "tif", "tiff", "webp", "icns"
-}
-
-ARCHIVE_EXTENSIONS = {
-    "7z", "bz2", "gz", "rar", "tar", "tbz2", "tgz", "txz", "xz", "zip"
-}
-
-FONT_EXTENSIONS = {
-    "otf", "ttf", "woff", "woff2"
-}
-
-MULTI_EXTENSIONS = {
-    ".tar.gz": ("tar.gz", "archive"),
-    ".tar.bz2": ("tar.bz2", "archive"),
-    ".tar.xz": ("tar.xz", "archive")
-}
-
-def _emit(payload):
-    print(json.dumps(payload), flush=True)
-
-class _ProgressEmitter:
-    def __init__(self, task_id, min_interval=0.25):
-        self.task_id = task_id
-        self.min_interval = min_interval
-        self.last_emit = 0.0
-        self.start_time = time.monotonic()
-
-    def emit(self, percent, status="processing", force=False, eta_seconds=None):
-        if percent is None:
-            return
-        try:
-            percent_val = float(percent)
-        except Exception:
-            return
-        if percent_val < 0:
-            percent_val = 0.0
-        if percent_val > 100:
-            percent_val = 100.0
-        now = time.monotonic()
-        if not force and self.last_emit and (now - self.last_emit) < self.min_interval:
-            return
-        eta_payload = None
-        if eta_seconds is not None:
-            try:
-                eta_payload = float(eta_seconds)
-                if eta_payload < 0:
-                    eta_payload = 0.0
-            except Exception:
-                eta_payload = None
-        if eta_payload is None and 0 < percent_val < 100:
-            elapsed = now - self.start_time
-            if elapsed > 0:
-                total = elapsed / (percent_val / 100.0)
-                eta_payload = max(0.0, total - elapsed)
-        payload = {
-            "type": "progress",
-            "id": self.task_id,
-            "percent": percent_val,
-            "status": status
-        }
-        if eta_payload is not None:
-            payload["eta_seconds"] = eta_payload
-        _emit(payload)
-        self.last_emit = now
 
 def _format_duration(seconds):
     if seconds is None:
@@ -462,6 +391,9 @@ class ConvertHandler:
             total = sum(info.file_size for info in infos) or len(infos)
             done = 0
             for info in infos:
+                target_path = os.path.join(work_dir, info.filename)
+                if not is_safe_path(work_dir, target_path):
+                    continue
                 zf.extract(info, work_dir)
                 done += info.file_size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
@@ -472,6 +404,9 @@ class ConvertHandler:
             total = sum(m.size for m in members) or len(members)
             done = 0
             for member in members:
+                target_path = os.path.join(work_dir, member.name)
+                if not is_safe_path(work_dir, target_path):
+                    continue
                 tf.extract(member, work_dir)
                 done += member.size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
@@ -481,6 +416,10 @@ class ConvertHandler:
             raise Exception("py7zr is not available.")
         with py7zr.SevenZipFile(input_path, mode="r") as zf:
             items = zf.list()
+            for item in items:
+                target_path = os.path.join(work_dir, item.filename)
+                if not is_safe_path(work_dir, target_path):
+                    raise Exception(f"Unsafe path in archive: {item.filename}")
             total = sum(item.uncompressed for item in items if item.uncompressed) or len(items)
             zf.extractall(work_dir)
             done = total if total else len(items)
@@ -494,6 +433,9 @@ class ConvertHandler:
             total = sum(info.file_size for info in infos) or len(infos)
             done = 0
             for info in infos:
+                target_path = os.path.join(work_dir, info.filename)
+                if not is_safe_path(work_dir, target_path):
+                    continue
                 rf.extract(info, work_dir)
                 done += info.file_size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
