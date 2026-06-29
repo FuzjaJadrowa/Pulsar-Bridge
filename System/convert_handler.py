@@ -95,31 +95,11 @@ def _extract_duration(path):
     except Exception:
         return None
 
-def _detect_extension(path):
-    name = os.path.basename(path)
-    lowered = name.lower()
-    for suffix, result in MULTI_EXTENSIONS.items():
-        if lowered.endswith(suffix):
-            return result
-    _, ext = os.path.splitext(lowered)
-    if not ext:
-        return None, None
-    return ext.lstrip("."), None
-
-def _detect_category(ext):
-    if not ext:
-        return None
-    if ext in VIDEO_EXTENSIONS:
-        return "video"
-    if ext in AUDIO_EXTENSIONS:
-        return "audio"
-    if ext in IMAGE_EXTENSIONS:
-        return "image"
-    if ext in ARCHIVE_EXTENSIONS:
-        return "archive"
-    if ext in FONT_EXTENSIONS:
-        return "font"
-    return None
+from System.extensions import (
+    VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, IMAGE_EXTENSIONS,
+    ARCHIVE_EXTENSIONS, FONT_EXTENSIONS, MULTI_EXTENSIONS,
+    _probe_file_content, _detect_extension, _detect_category
+)
 
 def _extract_image_size(path):
     if not Image:

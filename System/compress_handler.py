@@ -48,13 +48,22 @@ class CompressHandler:
                 })
                 return
             if category not in ("video", "audio", "image"):
-                _emit({
-                    "type": "finished",
-                    "id": self.task_id,
-                    "success": False,
-                    "error": "Unsupported compression category."
-                })
-                return
+                from System.extensions import _detect_extension, _detect_category
+                ext, forced_cat = _detect_extension(input_path)
+                detected_cat = forced_cat or _detect_category(ext)
+                if not detected_cat or detected_cat not in ("video", "audio", "image"):
+                    out_ext, out_forced = _detect_extension(output_path)
+                    detected_cat = out_forced or _detect_category(out_ext)
+                if detected_cat in ("video", "audio", "image"):
+                    category = detected_cat
+                else:
+                    _emit({
+                        "type": "finished",
+                        "id": self.task_id,
+                        "success": False,
+                        "error": "Unsupported compression category."
+                    })
+                    return
             if not output_path:
                 _emit({
                     "type": "finished",
