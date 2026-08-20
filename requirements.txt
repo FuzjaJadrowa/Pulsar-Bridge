@@ -1,4 +1,4 @@
-yt-dlp==2026.6.9
+yt-dlp==2026.8.19
 pyinstaller
 ytmusicapi>=1.6.0
 hachoir==3.3.0

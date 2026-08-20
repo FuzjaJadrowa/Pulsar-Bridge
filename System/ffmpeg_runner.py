@@ -48,6 +48,11 @@ def _parse_progress_line(line):
     return data
 
 def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
+    import sys
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = 0x00008000  # ABOVE_NORMAL_PRIORITY_CLASS
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -57,7 +62,8 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
         bufsize=1,
         universal_newlines=True,
         encoding="utf-8",
-        errors="replace"
+        errors="replace",
+        creationflags=creationflags
     )
     if not register_ffmpeg(task_id, proc):
         proc.kill()

@@ -2,11 +2,13 @@ import json
 import re
 import urllib.parse
 import urllib.request
+import threading
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 _SPOTIFY_CACHE = {}
 _SPOTIFY_CACHE_ORDER = []
 _SPOTIFY_CACHE_LIMIT = 24
+_cache_lock = threading.Lock()
 
 
 def is_spotify_url(url):
@@ -17,26 +19,28 @@ def is_spotify_url(url):
 
 
 def _cache_get(key):
-    if key in _SPOTIFY_CACHE:
-        if key in _SPOTIFY_CACHE_ORDER:
-            _SPOTIFY_CACHE_ORDER.remove(key)
-        _SPOTIFY_CACHE_ORDER.append(key)
-        return _SPOTIFY_CACHE[key]
-    return None
+    with _cache_lock:
+        if key in _SPOTIFY_CACHE:
+            if key in _SPOTIFY_CACHE_ORDER:
+                _SPOTIFY_CACHE_ORDER.remove(key)
+            _SPOTIFY_CACHE_ORDER.append(key)
+            return _SPOTIFY_CACHE[key]
+        return None
 
 
 def _cache_set(key, value):
-    if key in _SPOTIFY_CACHE:
+    with _cache_lock:
+        if key in _SPOTIFY_CACHE:
+            _SPOTIFY_CACHE[key] = value
+            if key in _SPOTIFY_CACHE_ORDER:
+                _SPOTIFY_CACHE_ORDER.remove(key)
+            _SPOTIFY_CACHE_ORDER.append(key)
+            return
         _SPOTIFY_CACHE[key] = value
-        if key in _SPOTIFY_CACHE_ORDER:
-            _SPOTIFY_CACHE_ORDER.remove(key)
         _SPOTIFY_CACHE_ORDER.append(key)
-        return
-    _SPOTIFY_CACHE[key] = value
-    _SPOTIFY_CACHE_ORDER.append(key)
-    while len(_SPOTIFY_CACHE_ORDER) > _SPOTIFY_CACHE_LIMIT:
-        oldest = _SPOTIFY_CACHE_ORDER.pop(0)
-        _SPOTIFY_CACHE.pop(oldest, None)
+        while len(_SPOTIFY_CACHE_ORDER) > _SPOTIFY_CACHE_LIMIT:
+            oldest = _SPOTIFY_CACHE_ORDER.pop(0)
+            _SPOTIFY_CACHE.pop(oldest, None)
 
 
 def _fetch_url_text(url, timeout=6):

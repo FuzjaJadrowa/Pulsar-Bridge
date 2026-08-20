@@ -1,6 +1,7 @@
 import json
 import os
 import gettext
+from System.utils import emit_json
 
 class YTMusicSearchHandler:
     def __init__(self, task_id):
@@ -68,12 +69,12 @@ class YTMusicSearchHandler:
         try:
             query = str(args[0]).strip() if args else ""
             if not query:
-                print(json.dumps({
+                emit_json({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
                     "error": "No query provided for YT Music search"
-                }), flush=True)
+                })
                 return
 
             limit = self._parse_limit(args[1]) if len(args) > 1 else 10
@@ -95,12 +96,12 @@ class YTMusicSearchHandler:
             try:
                 from ytmusicapi import YTMusic
             except Exception as e:
-                print(json.dumps({
+                emit_json({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
                     "error": f"ytmusicapi not available: {str(e)}"
-                }), flush=True)
+                })
                 return
 
             yt = YTMusic()
@@ -142,17 +143,17 @@ class YTMusicSearchHandler:
                 if len(output) >= limit:
                     break
 
-            print(json.dumps({
+            emit_json({
                 "type": "search_results",
                 "id": self.task_id,
                 "success": True,
                 "data": output
-            }), flush=True)
+            })
 
         except Exception as e:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": str(e)
-            }), flush=True)
+            })

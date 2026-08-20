@@ -3,6 +3,7 @@ import threading
 import subprocess
 import os
 import time
+import weakref
 from contextlib import contextmanager
 
 import yt_dlp.downloader.external as yt_external
@@ -19,12 +20,14 @@ _patch_lock = threading.Lock()
 
 def kill_processes_for_task(task_id):
     with _popens_lock:
-        popens = _active_popens.pop(task_id, [])
-    for p in popens:
-        try:
-            p.kill()
-        except Exception:
-            pass
+        popens_refs = _active_popens.pop(task_id, [])
+    for ref in popens_refs:
+        p = ref()
+        if p is not None:
+            try:
+                p.kill()
+            except Exception:
+                pass
     kill_ffmpeg_for_task(task_id)
 
 class GlobalBridgeFFmpegPopen(_original_popen):
@@ -47,6 +50,9 @@ class GlobalBridgeFFmpegPopen(_original_popen):
             kwargs.setdefault("stdout", subprocess.DEVNULL)
             kwargs.setdefault("text", False)
             kwargs.setdefault("bufsize", 1024 * 64)
+            import sys
+            if sys.platform == "win32":
+                kwargs.setdefault("creationflags", 0x00008000) # ABOVE_NORMAL_PRIORITY_CLASS
 
         super().__init__(args, *remaining, **kwargs)
 
@@ -54,7 +60,7 @@ class GlobalBridgeFFmpegPopen(_original_popen):
             with _popens_lock:
                 if self.task_id not in _active_popens:
                     _active_popens[self.task_id] = []
-                _active_popens[self.task_id].append(self)
+                _active_popens[self.task_id].append(weakref.ref(self))
 
         if is_ffmpeg and self.stderr is not None:
             self._stderr_thread = threading.Thread(target=self._consume_ffmpeg_stderr, daemon=True)
@@ -116,8 +122,11 @@ class GlobalBridgeFFmpegPopen(_original_popen):
 
         if self.task_id:
             with _popens_lock:
-                if self.task_id in _active_popens and self in _active_popens[self.task_id]:
-                    _active_popens[self.task_id].remove(self)
+                if self.task_id in _active_popens:
+                    _active_popens[self.task_id] = [
+                        ref for ref in _active_popens[self.task_id]
+                        if ref() is not None and ref() is not self
+                    ]
 
         return ret
 

@@ -262,12 +262,12 @@ class DownloadMetadataHandler:
             urls = parsed_args[2]
 
             if not urls:
-                print(json.dumps({
+                emit_json({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
                     "error": "No URL provided for metadata"
-                }), flush=True)
+                })
                 return
 
             spotify_meta = None
@@ -278,12 +278,12 @@ class DownloadMetadataHandler:
             if is_spotify_url(urls[0]):
                 spotify_payload = resolve_spotify_for_metadata(urls[0])
                 if not spotify_payload:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unsupported link"
-                    }), flush=True)
+                    })
                     return
                 spotify_meta = spotify_payload.get("spotify")
                 resolved = spotify_payload.get("yt_query")
@@ -296,76 +296,76 @@ class DownloadMetadataHandler:
                 if resolved:
                     urls = [resolved]
                 else:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unable to resolve youtube query"
-                    }), flush=True)
+                    })
                     return
                 force_subs_output = True
 
             elif is_apple_music_url(urls[0]):
                 apple_payload = resolve_apple_music_for_metadata(urls[0])
                 if not apple_payload:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unsupported link"
-                    }), flush=True)
+                    })
                     return
                 if apple_payload.get("error"):
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": apple_payload.get("error")
-                    }), flush=True)
+                    })
                     return
                 apple_meta = apple_payload.get("apple_music")
                 resolved = apple_payload.get("yt_query")
                 if resolved:
                     urls = [resolved]
                 else:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unable to resolve youtube query"
-                    }), flush=True)
+                    })
                     return
                 force_subs_output = True
 
             elif is_deezer_url(urls[0]):
                 deezer_payload = resolve_deezer_for_metadata(urls[0])
                 if not deezer_payload:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unsupported link"
-                    }), flush=True)
+                    })
                     return
                 if deezer_payload.get("error"):
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": deezer_payload.get("error")
-                    }), flush=True)
+                    })
                     return
                 deezer_meta = deezer_payload.get("deezer")
                 resolved = deezer_payload.get("yt_query")
                 if resolved:
                     urls = [resolved]
                 else:
-                    print(json.dumps({
+                    emit_json({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
                         "error": "unable to resolve youtube query"
-                    }), flush=True)
+                    })
                     return
                 force_subs_output = True
 
@@ -533,27 +533,27 @@ class DownloadMetadataHandler:
                     "track_count": len(tracks)
                 }
 
-            print(json.dumps({
+            emit_json({
                 "type": "metadata",
                 "id": self.task_id,
                 "success": True,
                 "data": minimized_info
-            }), flush=True)
+            })
 
         except SystemExit:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": "Cancelled"
-            }), flush=True)
+            })
         except Exception as e:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": logger.last_error or str(e)
-            }), flush=True)
+            })
 
 
 class SearchHandler:
@@ -607,12 +607,12 @@ class SearchHandler:
             urls = parsed_args[2]
 
             if not urls:
-                print(json.dumps({
+                emit_json({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
                     "error": "No query provided for search"
-                }), flush=True)
+                })
                 return
 
             query, limit = self._parse_ytmusic_search(urls[0])
@@ -658,24 +658,24 @@ class SearchHandler:
                         'url': entry.get('url') or entry.get('webpage_url')
                     })
 
-            print(json.dumps({
+            emit_json({
                 "type": "search_results",
                 "id": self.task_id,
                 "success": True,
                 "data": results
-            }), flush=True)
+            })
 
         except SystemExit:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": "Cancelled"
-            }), flush=True)
+            })
         except Exception as e:
-            print(json.dumps({
+            emit_json({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
                 "error": logger.last_error or str(e)
-            }), flush=True)
+            })
