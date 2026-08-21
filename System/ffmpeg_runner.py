@@ -93,9 +93,9 @@ def run_ffmpeg_with_progress(task_id, ffmpeg_path, args, progress_callback):
     cmd = [ffmpeg_path] + args + ["-progress", "pipe:1", "-nostats"]
 
     if _FFMpegProgress and hasattr(_FFMpegProgress, "run_command_with_progress"):
+        registered = False
         try:
             runner = _FFMpegProgress(cmd)
-            registered = False
             for payload in runner.run_command_with_progress():
                 proc = getattr(runner, "process", None)
                 if proc is not None and not registered:
@@ -109,10 +109,11 @@ def run_ffmpeg_with_progress(task_id, ffmpeg_path, args, progress_callback):
             if proc is None and not registered:
                 raise RuntimeError("FFmpeg process not attached.")
             ret = proc.returncode if proc is not None else 0
-            if registered:
-                kill_ffmpeg_for_task(task_id)
             return ret
         except Exception:
             pass
+        finally:
+            if registered:
+                kill_ffmpeg_for_task(task_id)
 
     return _run_ffmpeg_manual(task_id, cmd, progress_callback)
