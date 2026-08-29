@@ -8,8 +8,6 @@ from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer
 from main import BridgeLogger
 from System.utils import emit_json
 
-
-
 class DownloadHandler:
     def __init__(self, task_id):
         self.task_id = task_id
@@ -25,17 +23,8 @@ class DownloadHandler:
 
     def _extract_playlist_progress(self, d):
         info = d.get('info_dict') or {}
-        index = (
-            d.get('playlist_index')
-            or info.get('playlist_index')
-            or info.get('playlist_autonumber')
-        )
-        count = (
-            d.get('playlist_count')
-            or info.get('playlist_count')
-            or info.get('n_entries')
-            or info.get('playlist_size')
-        )
+        index = d.get('playlist_index') or info.get('playlist_index')
+        count = d.get('playlist_count') or info.get('playlist_count')
 
         index = self._parse_int(index)
         count = self._parse_int(count)
@@ -216,23 +205,17 @@ class DownloadMetadataHandler:
 
         if info.get('_type') == 'playlist' and info.get('entries'):
             first = next((e for e in info['entries'] if e), None)
-            if not first:
-                return info
-            if isinstance(first, dict):
-                if first.get('_type') in ('url', 'url_transparent') or (
-                    not first.get('subtitles') and not first.get('automatic_captions')
-                ):
+            if first and isinstance(first, dict):
+                if first.get('_type') in ('url', 'url_transparent') and not first.get('title'):
                     url = self._build_youtube_url(first)
                     if url:
                         try:
                             return ydl.extract_info(url, download=False)
                         except Exception:
                             return first
-            return first
+                return first
 
-        if info.get('_type') in ('url', 'url_transparent') or (
-            not info.get('subtitles') and not info.get('automatic_captions')
-        ):
+        if info.get('_type') in ('url', 'url_transparent') and not info.get('title'):
             url = self._build_youtube_url(info)
             if url:
                 try:
