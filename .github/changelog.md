@@ -1,3 +1,2 @@
-# Build 23
-- Optimized playlist metadata grabbing.
-- Removed unused fallbacks.
+# Build 25
+- Added `vider.info` support using custom resolver.

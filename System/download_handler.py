@@ -5,8 +5,37 @@ from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
 from Download.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
 from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
 from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
+from Download.vider_resolver import resolve_vider_for_download, resolve_vider_for_metadata, is_vider_url
 from main import BridgeLogger
 from System.utils import emit_json
+
+def _merge_http_headers(ydl_opts, headers):
+    if not headers:
+        return
+    merged = dict(ydl_opts.get('http_headers') or {})
+    merged.update(headers)
+    ydl_opts['http_headers'] = merged
+
+def _load_resolver_cookiejar(ydl_opts):
+    cookiefile = ydl_opts.get('cookiefile')
+    cookiesfrombrowser = ydl_opts.get('cookiesfrombrowser')
+    if not cookiefile and not cookiesfrombrowser:
+        return None
+
+    cookie_opts = {
+        'quiet': True,
+        'no_warnings': True,
+    }
+    if cookiefile:
+        cookie_opts['cookiefile'] = cookiefile
+    if cookiesfrombrowser:
+        cookie_opts['cookiesfrombrowser'] = cookiesfrombrowser
+
+    try:
+        with yt_dlp.YoutubeDL(cookie_opts) as cookie_ydl:
+            return cookie_ydl.cookiejar
+    except Exception as exc:
+        raise Exception(f"Unable to load cookies for resolver: {exc}") from exc
 
 class DownloadHandler:
     def __init__(self, task_id):
@@ -80,6 +109,7 @@ class DownloadHandler:
 
     def run(self, args_list):
         logger = BridgeLogger(self.task_id)
+        site_contexts = []
         try:
             extra_args = ["--remote-components", "ejs:github"]
             final_args = extra_args + args_list
@@ -88,13 +118,19 @@ class DownloadHandler:
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
             original_urls = list(urls)
+            resolver_cookiejar = _load_resolver_cookiejar(ydl_opts)
 
             try:
                 urls = resolve_spotify_for_download(urls)
                 urls = resolve_apple_music_for_download(urls)
                 urls = resolve_deezer_for_download(urls)
+                urls, vider_contexts = resolve_vider_for_download(urls, cookiejar=resolver_cookiejar)
+                site_contexts.extend(vider_contexts)
             except AppleMusicUnsupportedError as e:
                 raise Exception(str(e))
+
+            if len(original_urls) == 1 and site_contexts:
+                _merge_http_headers(ydl_opts, site_contexts[0].get('http_headers'))
 
             expanded_from_non_yt = any(
                 is_spotify_url(u) or is_apple_music_url(u) or is_deezer_url(u)
@@ -136,7 +172,6 @@ class DownloadHandler:
             error_msg = logger.last_error or str(e)
             if "yt-dlp exited with error code" in error_msg:
                 error_msg = "Download failed."
-
             emit_json({
                 "type": "finished",
                 "id": self.task_id,
@@ -243,6 +278,7 @@ class DownloadMetadataHandler:
             parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
+            resolver_cookiejar = _load_resolver_cookiejar(ydl_opts)
 
             if not urls:
                 emit_json({
@@ -256,6 +292,8 @@ class DownloadMetadataHandler:
             spotify_meta = None
             apple_meta = None
             deezer_meta = None
+            direct_resolver_meta = None
+            direct_resolver_headers = None
             force_subs_output = False
 
             if is_spotify_url(urls[0]):
@@ -265,7 +303,7 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unsupported link"
+                        "error": "Unsupported link"
                     })
                     return
                 spotify_meta = spotify_payload.get("spotify")
@@ -283,7 +321,7 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unable to resolve youtube query"
+                        "error": "Unable to resolve youtube query"
                     })
                     return
                 force_subs_output = True
@@ -295,7 +333,7 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unsupported link"
+                        "error": "Unsupported link"
                     })
                     return
                 if apple_payload.get("error"):
@@ -315,7 +353,7 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unable to resolve youtube query"
+                        "error": "Unable to resolve youtube query"
                     })
                     return
                 force_subs_output = True
@@ -327,7 +365,7 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unsupported link"
+                        "error": "Unsupported link"
                     })
                     return
                 if deezer_payload.get("error"):
@@ -347,10 +385,17 @@ class DownloadMetadataHandler:
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "unable to resolve youtube query"
+                        "error": "Unable to resolve YouTube query"
                     })
                     return
                 force_subs_output = True
+
+            elif is_vider_url(urls[0]):
+                direct_resolver_meta = resolve_vider_for_metadata(urls[0], cookiejar=resolver_cookiejar)
+                if not direct_resolver_meta:
+                    raise Exception("Unsupported Vider link")
+                direct_resolver_headers = direct_resolver_meta.get("http_headers")
+                urls = [direct_resolver_meta["media_url"]]
 
             ydl_opts = {
                 'quiet': True,
@@ -384,20 +429,37 @@ class DownloadMetadataHandler:
                     emit_json({"type": "finished", "id": self.task_id, "success": False, "error": f"Args error: {str(e)}"})
                     return
 
+            if direct_resolver_headers:
+                _merge_http_headers(ydl_opts, direct_resolver_headers)
+
             if self._is_youtube_playlist_url(urls[0]):
                 ydl_opts['extract_flat'] = 'in_playlist'
                 ydl_opts['playlistend'] = 1
                 ydl_opts['playlist_items'] = '1'
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(urls[0], download=False)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(urls[0], download=False)
 
-                info = self._ensure_full_info(ydl, info)
-                if not info:
-                    raise Exception("No metadata extracted")
+                    info = self._ensure_full_info(ydl, info)
+                    if not info:
+                        raise Exception("No metadata extracted")
 
-                clean_info = ydl.sanitize_info(info)
-                minimized_info = self._filter_metadata(clean_info, force_subtitle_langs=force_subs_output)
+                    clean_info = ydl.sanitize_info(info)
+                    minimized_info = self._filter_metadata(clean_info, force_subtitle_langs=force_subs_output)
+            except Exception:
+                if not direct_resolver_meta:
+                    raise
+                minimized_info = {
+                    "id": direct_resolver_meta.get("id"),
+                    "title": direct_resolver_meta.get("title") or "Resolved video",
+                    "fulltitle": direct_resolver_meta.get("title") or "Resolved video",
+                    "thumbnail": direct_resolver_meta.get("thumbnail"),
+                    "webpage_url": direct_resolver_meta.get("webpage_url"),
+                    "formats": [],
+                    "subtitles_langs": [],
+                    "auto_captions_langs": [],
+                }
 
             if spotify_meta:
                 tracks = spotify_meta.get("tracks") or []
@@ -514,6 +576,25 @@ class DownloadMetadataHandler:
                     "author_url": author_url,
                     "thumbnail": thumbnail,
                     "track_count": len(tracks)
+                }
+
+            if direct_resolver_meta:
+                resolved_title = direct_resolver_meta.get("title")
+                resolved_thumbnail = direct_resolver_meta.get("thumbnail")
+                resolved_page = direct_resolver_meta.get("webpage_url")
+                resolved_id = direct_resolver_meta.get("id")
+                if resolved_id:
+                    minimized_info["id"] = resolved_id
+                if resolved_title:
+                    minimized_info["title"] = resolved_title
+                    minimized_info["fulltitle"] = resolved_title
+                if resolved_thumbnail:
+                    minimized_info["thumbnail"] = resolved_thumbnail
+                if resolved_page:
+                    minimized_info["webpage_url"] = resolved_page
+                minimized_info["resolver"] = {
+                    "source": direct_resolver_meta.get("source"),
+                    "player_host": direct_resolver_meta.get("player_host"),
                 }
 
             emit_json({
