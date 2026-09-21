@@ -2,9 +2,9 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from Download.music_extractor import MusicCatalogIE
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-
 
 class AppleMusicUnsupportedError(Exception):
     pass
@@ -23,9 +23,9 @@ def _fetch_url_text(url, timeout=6):
         return response.read().decode("utf-8", errors="replace"), response.geturl()
 
 
-def _resolve_redirect(url):
+def _resolve_redirect(url, fetch_text=_fetch_url_text):
     try:
-        _, final_url = _fetch_url_text(url, timeout=6)
+        _, final_url = fetch_text(url, timeout=6)
         return final_url or url
     except Exception:
         return url
@@ -37,7 +37,7 @@ def _normalize_artwork(url):
     return re.sub(r"/\d+x\d+bb", "/600x600bb", url)
 
 
-def _itunes_lookup(item_id, country=None, entity=None):
+def _itunes_lookup(item_id, country=None, entity=None, fetch_text=_fetch_url_text):
     if not item_id:
         return None
     params = {"id": str(item_id)}
@@ -48,35 +48,39 @@ def _itunes_lookup(item_id, country=None, entity=None):
     query = urllib.parse.urlencode(params)
     url = f"https://itunes.apple.com/lookup?{query}"
     try:
-        text, _ = _fetch_url_text(url, timeout=8)
+        text, _ = fetch_text(url, timeout=8)
         return json.loads(text)
     except Exception:
         return None
 
 
-def _fetch_oembed(url):
+def _fetch_oembed(url, fetch_text=_fetch_url_text):
     try:
         oembed_url = "https://embed.music.apple.com/oembed?url=" + urllib.parse.quote(url)
-        text, _ = _fetch_url_text(oembed_url, timeout=6)
+        text, _ = fetch_text(oembed_url, timeout=6)
         return json.loads(text)
     except Exception:
         return None
 
 
-def parse_apple_music_url(raw_url):
+def parse_apple_music_url(raw_url, fetch_text=_fetch_url_text, _seen=None):
     if not raw_url:
         return None
     url = str(raw_url).strip()
+    _seen = set() if _seen is None else _seen
+    if url in _seen or len(_seen) >= 5:
+        return None
+    _seen.add(url)
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
         return None
 
     host = (parsed.hostname or "").lower()
-    if host.endswith("apple.co"):
-        return parse_apple_music_url(_resolve_redirect(url))
+    if host == "apple.co" or host.endswith(".apple.co"):
+        return parse_apple_music_url(_resolve_redirect(url, fetch_text), fetch_text, _seen)
 
-    if not (host.endswith("music.apple.com") or host.endswith("itunes.apple.com")):
+    if host not in ("music.apple.com", "itunes.apple.com"):
         return None
 
     parts = [p for p in parsed.path.split("/") if p]
@@ -130,7 +134,7 @@ def _build_tracks_from_itunes(results):
     return tracks
 
 
-def _build_payload(parsed):
+def _build_payload(parsed, fetch_text=_fetch_url_text):
     if not parsed:
         return None
 
@@ -138,7 +142,7 @@ def _build_payload(parsed):
         return {"error": "unsupported link"}
 
     country = parsed.get("country")
-    oembed = _fetch_oembed(parsed.get("url"))
+    oembed = _fetch_oembed(parsed.get("url"), fetch_text)
 
     title = None
     author = None
@@ -147,7 +151,7 @@ def _build_payload(parsed):
     tracks = []
 
     if parsed["type"] == "track":
-        lookup = _itunes_lookup(parsed.get("track_id"), country=country)
+        lookup = _itunes_lookup(parsed.get("track_id"), country=country, fetch_text=fetch_text)
         if lookup and lookup.get("results"):
             track_item = next((r for r in lookup["results"] if r.get("wrapperType") == "track"), None)
             if track_item:
@@ -158,7 +162,7 @@ def _build_payload(parsed):
                 tracks = _build_tracks_from_itunes([track_item])
 
     if parsed["type"] == "album":
-        lookup = _itunes_lookup(parsed.get("collection_id"), country=country, entity="song")
+        lookup = _itunes_lookup(parsed.get("collection_id"), country=country, entity="song", fetch_text=fetch_text)
         if lookup and lookup.get("results"):
             collection = next((r for r in lookup["results"] if r.get("wrapperType") == "collection"), None)
             if collection:
@@ -242,3 +246,12 @@ def resolve_apple_music_for_metadata(url):
         "apple_music": payload,
         "yt_query": queries[0] if queries else None
     }
+
+class AppleMusicIE(MusicCatalogIE):
+    IE_NAME = 'pulsar:apple-music'
+    _VALID_URL = r'https?://(?:music\.apple\.com|itunes\.apple\.com|apple\.co)/[^\s]+'
+    _SOURCE = 'apple_music'
+
+    def _catalog_payload(self, url):
+        parsed = parse_apple_music_url(url, fetch_text=self._fetch_text)
+        return _build_payload(parsed, fetch_text=self._fetch_text)

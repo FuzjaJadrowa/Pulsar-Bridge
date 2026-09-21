@@ -2,40 +2,9 @@ import yt_dlp
 import json
 from Download.ytmusic_search import YTMusicSearchHandler
 from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
-from Download.spotify_resolver import resolve_spotify_for_download, resolve_spotify_for_metadata, is_spotify_url
-from Download.apple_music_resolver import resolve_apple_music_for_download, resolve_apple_music_for_metadata, AppleMusicUnsupportedError, is_apple_music_url
-from Download.deezer_resolver import resolve_deezer_for_download, resolve_deezer_for_metadata, is_deezer_url
-from Download.vider_resolver import resolve_vider_for_download, resolve_vider_for_metadata, is_vider_url
+from Download.extractors import create_resolver_ydl, metadata_fallback
 from main import BridgeLogger
 from System.utils import emit_json
-
-def _merge_http_headers(ydl_opts, headers):
-    if not headers:
-        return
-    merged = dict(ydl_opts.get('http_headers') or {})
-    merged.update(headers)
-    ydl_opts['http_headers'] = merged
-
-def _load_resolver_cookiejar(ydl_opts):
-    cookiefile = ydl_opts.get('cookiefile')
-    cookiesfrombrowser = ydl_opts.get('cookiesfrombrowser')
-    if not cookiefile and not cookiesfrombrowser:
-        return None
-
-    cookie_opts = {
-        'quiet': True,
-        'no_warnings': True,
-    }
-    if cookiefile:
-        cookie_opts['cookiefile'] = cookiefile
-    if cookiesfrombrowser:
-        cookie_opts['cookiesfrombrowser'] = cookiesfrombrowser
-
-    try:
-        with yt_dlp.YoutubeDL(cookie_opts) as cookie_ydl:
-            return cookie_ydl.cookiejar
-    except Exception as exc:
-        raise Exception(f"Unable to load cookies for resolver: {exc}") from exc
 
 class DownloadHandler:
     def __init__(self, task_id):
@@ -109,7 +78,6 @@ class DownloadHandler:
 
     def run(self, args_list):
         logger = BridgeLogger(self.task_id)
-        site_contexts = []
         try:
             extra_args = ["--remote-components", "ejs:github"]
             final_args = extra_args + args_list
@@ -117,29 +85,6 @@ class DownloadHandler:
             parsed_args = yt_dlp.parse_options(final_args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
-            original_urls = list(urls)
-            resolver_cookiejar = _load_resolver_cookiejar(ydl_opts)
-
-            try:
-                urls = resolve_spotify_for_download(urls)
-                urls = resolve_apple_music_for_download(urls)
-                urls = resolve_deezer_for_download(urls)
-                urls, vider_contexts = resolve_vider_for_download(urls, cookiejar=resolver_cookiejar)
-                site_contexts.extend(vider_contexts)
-            except AppleMusicUnsupportedError as e:
-                raise Exception(str(e))
-
-            if len(original_urls) == 1 and site_contexts:
-                _merge_http_headers(ydl_opts, site_contexts[0].get('http_headers'))
-
-            expanded_from_non_yt = any(
-                is_spotify_url(u) or is_apple_music_url(u) or is_deezer_url(u)
-                for u in original_urls
-            )
-            if expanded_from_non_yt and len(urls) > 1:
-                self.expected_playlist_count = len(urls)
-                self.current_playlist_index = 1
-
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []
             ydl_opts['progress_hooks'].append(self._progress_hook)
@@ -149,7 +94,7 @@ class DownloadHandler:
             ydl_opts['ignoreerrors'] = False
 
             with patch_ffmpeg_popen_for_progress(self.task_id):
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with create_resolver_ydl(ydl_opts) as ydl:
                     retcode = ydl.download(urls)
 
             if retcode != 0:
@@ -190,7 +135,8 @@ class DownloadMetadataHandler:
             'upload_date', 'duration', 'duration_string',
             'view_count', 'like_count', 'comment_count',
             'age_limit', 'is_live', 'was_live', 'availability',
-            'channel', 'channel_follower_count', 'webpage_url', 'spotify', 'apple_music', 'deezer'
+            'channel', 'channel_follower_count', 'webpage_url', 'spotify', 'apple_music', 'deezer',
+            'resolver', 'resolver_warning'
         ]
         filtered = {k: info.get(k) for k in keys_to_keep if k in info}
 
@@ -272,351 +218,54 @@ class DownloadMetadataHandler:
     def run(self, args):
         logger = BridgeLogger(self.task_id)
         try:
-            extra_args = ["--remote-components", "ejs:github"]
-            final_args = extra_args + args
-
-            parsed_args = yt_dlp.parse_options(final_args)
-            ydl_opts = parsed_args[3]
-            urls = parsed_args[2]
-            resolver_cookiejar = _load_resolver_cookiejar(ydl_opts)
-
+            parsed_args = yt_dlp.parse_options(["--remote-components", "ejs:github"] + args)
+            urls, ydl_opts = parsed_args[2], parsed_args[3]
             if not urls:
-                emit_json({
-                    "type": "finished",
-                    "id": self.task_id,
-                    "success": False,
-                    "error": "No URL provided for metadata"
-                })
-                return
-
-            spotify_meta = None
-            apple_meta = None
-            deezer_meta = None
-            direct_resolver_meta = None
-            direct_resolver_headers = None
-            force_subs_output = False
-
-            if is_spotify_url(urls[0]):
-                spotify_payload = resolve_spotify_for_metadata(urls[0])
-                if not spotify_payload:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unsupported link"
-                    })
-                    return
-                spotify_meta = spotify_payload.get("spotify")
-                resolved = spotify_payload.get("yt_query")
-                if not resolved and spotify_meta:
-                    artist = (spotify_meta.get("author") or "").strip()
-                    title = (spotify_meta.get("title") or "").strip()
-                    if title or artist:
-                        query = f"{artist} - {title}" if title and artist else (title or artist)
-                        resolved = f"ytsearch1:{query} audio"
-                if resolved:
-                    urls = [resolved]
-                else:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unable to resolve youtube query"
-                    })
-                    return
-                force_subs_output = True
-
-            elif is_apple_music_url(urls[0]):
-                apple_payload = resolve_apple_music_for_metadata(urls[0])
-                if not apple_payload:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unsupported link"
-                    })
-                    return
-                if apple_payload.get("error"):
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": apple_payload.get("error")
-                    })
-                    return
-                apple_meta = apple_payload.get("apple_music")
-                resolved = apple_payload.get("yt_query")
-                if resolved:
-                    urls = [resolved]
-                else:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unable to resolve youtube query"
-                    })
-                    return
-                force_subs_output = True
-
-            elif is_deezer_url(urls[0]):
-                deezer_payload = resolve_deezer_for_metadata(urls[0])
-                if not deezer_payload:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unsupported link"
-                    })
-                    return
-                if deezer_payload.get("error"):
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": deezer_payload.get("error")
-                    })
-                    return
-                deezer_meta = deezer_payload.get("deezer")
-                resolved = deezer_payload.get("yt_query")
-                if resolved:
-                    urls = [resolved]
-                else:
-                    emit_json({
-                        "type": "finished",
-                        "id": self.task_id,
-                        "success": False,
-                        "error": "Unable to resolve YouTube query"
-                    })
-                    return
-                force_subs_output = True
-
-            elif is_vider_url(urls[0]):
-                direct_resolver_meta = resolve_vider_for_metadata(urls[0], cookiejar=resolver_cookiejar)
-                if not direct_resolver_meta:
-                    raise Exception("Unsupported Vider link")
-                direct_resolver_headers = direct_resolver_meta.get("http_headers")
-                urls = [direct_resolver_meta["media_url"]]
-
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'logger': logger,
-                'simulate': True,
-                'skip_download': True,
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                **ydl_opts,
-            }
-
-            if args:
-                try:
-                    parsed_args = yt_dlp.parse_options(final_args)
-                    user_opts = parsed_args[3]
-                    ydl_opts.update(user_opts)
-
-                    ydl_opts.update({
-                        'quiet': True,
-                        'no_warnings': True,
-                        'simulate': True,
-                        'skip_download': True,
-                        'logger': logger,
-                        'extract_flat': False,
-                        'writesubtitles': True,
-                        'writeautomaticsub': True
-                    })
-                except Exception as e:
-                    emit_json({"type": "finished", "id": self.task_id, "success": False, "error": f"Args error: {str(e)}"})
-                    return
-
-            if direct_resolver_headers:
-                _merge_http_headers(ydl_opts, direct_resolver_headers)
-
+                raise Exception("No URL provided for metadata")
+            ydl_opts.update({
+                'quiet': True, 'no_warnings': True, 'logger': logger,
+                'simulate': True, 'skip_download': True, 'ignoreerrors': False,
+                'extract_flat': False, 'writesubtitles': True, 'writeautomaticsub': True,
+                'pulsar_metadata': True,
+            })
             if self._is_youtube_playlist_url(urls[0]):
-                ydl_opts['extract_flat'] = 'in_playlist'
-                ydl_opts['playlistend'] = 1
-                ydl_opts['playlist_items'] = '1'
+                ydl_opts.update({'extract_flat': 'in_playlist', 'playlistend': 1, 'playlist_items': '1'})
 
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(urls[0], download=False)
-
-                    info = self._ensure_full_info(ydl, info)
+            with create_resolver_ydl(ydl_opts) as ydl:
+                try:
+                    info = self._ensure_full_info(ydl, ydl.extract_info(urls[0], download=False))
                     if not info:
                         raise Exception("No metadata extracted")
+                    force_subs = any(info.get(source) for source in ('spotify', 'apple_music', 'deezer'))
+                    minimized_info = self._filter_metadata(ydl.sanitize_info(info), force_subtitle_langs=force_subs)
+                except Exception as exc:
+                    fallback = metadata_fallback(ydl, urls[0])
+                    if not fallback:
+                        raise
+                    minimized_info = {
+                        'formats': [], 'subtitles_langs': [], 'auto_captions_langs': [],
+                        'resolver_warning': logger.last_error or str(exc),
+                    }
 
-                    clean_info = ydl.sanitize_info(info)
-                    minimized_info = self._filter_metadata(clean_info, force_subtitle_langs=force_subs_output)
-            except Exception:
-                if not direct_resolver_meta:
-                    raise
-                minimized_info = {
-                    "id": direct_resolver_meta.get("id"),
-                    "title": direct_resolver_meta.get("title") or "Resolved video",
-                    "fulltitle": direct_resolver_meta.get("title") or "Resolved video",
-                    "thumbnail": direct_resolver_meta.get("thumbnail"),
-                    "webpage_url": direct_resolver_meta.get("webpage_url"),
-                    "formats": [],
-                    "subtitles_langs": [],
-                    "auto_captions_langs": [],
-                }
+                fallback = metadata_fallback(ydl, urls[0])
+                if fallback:
+                    for field in ('id', 'title', 'thumbnail', 'webpage_url', 'description', 'duration'):
+                        if fallback.get(field) is not None:
+                            minimized_info[field] = fallback[field]
+                    if fallback.get('title'):
+                        minimized_info['fulltitle'] = fallback['title']
+                    minimized_info['resolver'] = {
+                        'source': fallback.get('source'),
+                        'player_host': fallback.get('player_host') or fallback.get('resolved_host'),
+                    }
 
-            if spotify_meta:
-                tracks = spotify_meta.get("tracks") or []
-                primary_track = tracks[0] if tracks else {}
-                meta_type = (spotify_meta.get("type") or "").lower()
-                if meta_type in ("playlist", "album", "artist", "show"):
-                    title = spotify_meta.get("title")
-                    author = spotify_meta.get("author")
-                else:
-                    title = primary_track.get("title") or spotify_meta.get("title")
-                    author = primary_track.get("artist") or spotify_meta.get("author")
-                author_url = spotify_meta.get("author_url")
-                thumbnail = spotify_meta.get("thumbnail")
-                if meta_type in ("playlist", "album", "artist", "show"):
-                    spotify_url = spotify_meta.get("url")
-                else:
-                    spotify_url = primary_track.get("spotify_url") or spotify_meta.get("url")
-
-                if title:
-                    minimized_info["title"] = title
-                    minimized_info["fulltitle"] = title
-                if author:
-                    minimized_info["uploader"] = author
-                    minimized_info["channel"] = author
-                if author_url:
-                    minimized_info["uploader_url"] = author_url
-                if thumbnail:
-                    minimized_info["thumbnail"] = thumbnail
-                if spotify_url:
-                    minimized_info["webpage_url"] = spotify_url
-                minimized_info["spotify"] = {
-                    "type": spotify_meta.get("type"),
-                    "url": spotify_meta.get("url"),
-                    "title": spotify_meta.get("title"),
-                    "author": spotify_meta.get("author"),
-                    "author_url": author_url,
-                    "thumbnail": thumbnail,
-                    "track_count": len(tracks)
-                }
-
-            if apple_meta:
-                tracks = apple_meta.get("tracks") or []
-                primary_track = tracks[0] if tracks else {}
-                meta_type = (apple_meta.get("type") or "").lower()
-                if meta_type in ("album", "playlist", "artist"):
-                    title = apple_meta.get("title")
-                    author = apple_meta.get("author")
-                else:
-                    title = primary_track.get("title") or apple_meta.get("title")
-                    author = primary_track.get("artist") or apple_meta.get("author")
-                author_url = apple_meta.get("author_url")
-                thumbnail = apple_meta.get("thumbnail")
-                if meta_type in ("album", "playlist", "artist"):
-                    apple_url = apple_meta.get("url")
-                else:
-                    apple_url = primary_track.get("apple_music_url") or apple_meta.get("url")
-
-                if title:
-                    minimized_info["title"] = title
-                    minimized_info["fulltitle"] = title
-                if author:
-                    minimized_info["uploader"] = author
-                    minimized_info["channel"] = author
-                if author_url:
-                    minimized_info["uploader_url"] = author_url
-                if thumbnail:
-                    minimized_info["thumbnail"] = thumbnail
-                if apple_url:
-                    minimized_info["webpage_url"] = apple_url
-                minimized_info["apple_music"] = {
-                    "type": apple_meta.get("type"),
-                    "url": apple_meta.get("url"),
-                    "title": apple_meta.get("title"),
-                    "author": apple_meta.get("author"),
-                    "author_url": author_url,
-                    "thumbnail": thumbnail,
-                    "track_count": len(tracks)
-                }
-
-            if deezer_meta:
-                tracks = deezer_meta.get("tracks") or []
-                primary_track = tracks[0] if tracks else {}
-                meta_type = (deezer_meta.get("type") or "").lower()
-                if meta_type in ("album", "playlist", "artist"):
-                    title = deezer_meta.get("title")
-                    author = deezer_meta.get("author")
-                else:
-                    title = primary_track.get("title") or deezer_meta.get("title")
-                    author = primary_track.get("artist") or deezer_meta.get("author")
-                author_url = deezer_meta.get("author_url")
-                thumbnail = deezer_meta.get("thumbnail")
-                if meta_type in ("album", "playlist", "artist"):
-                    deezer_url = deezer_meta.get("url")
-                else:
-                    deezer_url = primary_track.get("deezer_url") or deezer_meta.get("url")
-
-                if title:
-                    minimized_info["title"] = title
-                    minimized_info["fulltitle"] = title
-                if author:
-                    minimized_info["uploader"] = author
-                    minimized_info["channel"] = author
-                if author_url:
-                    minimized_info["uploader_url"] = author_url
-                if thumbnail:
-                    minimized_info["thumbnail"] = thumbnail
-                if deezer_url:
-                    minimized_info["webpage_url"] = deezer_url
-                minimized_info["deezer"] = {
-                    "type": deezer_meta.get("type"),
-                    "url": deezer_meta.get("url"),
-                    "title": deezer_meta.get("title"),
-                    "author": deezer_meta.get("author"),
-                    "author_url": author_url,
-                    "thumbnail": thumbnail,
-                    "track_count": len(tracks)
-                }
-
-            if direct_resolver_meta:
-                resolved_title = direct_resolver_meta.get("title")
-                resolved_thumbnail = direct_resolver_meta.get("thumbnail")
-                resolved_page = direct_resolver_meta.get("webpage_url")
-                resolved_id = direct_resolver_meta.get("id")
-                if resolved_id:
-                    minimized_info["id"] = resolved_id
-                if resolved_title:
-                    minimized_info["title"] = resolved_title
-                    minimized_info["fulltitle"] = resolved_title
-                if resolved_thumbnail:
-                    minimized_info["thumbnail"] = resolved_thumbnail
-                if resolved_page:
-                    minimized_info["webpage_url"] = resolved_page
-                minimized_info["resolver"] = {
-                    "source": direct_resolver_meta.get("source"),
-                    "player_host": direct_resolver_meta.get("player_host"),
-                }
-
-            emit_json({
-                "type": "metadata",
-                "id": self.task_id,
-                "success": True,
-                "data": minimized_info
-            })
-
+            emit_json({'type': 'metadata', 'id': self.task_id, 'success': True, 'data': minimized_info})
         except SystemExit:
+            emit_json({'type': 'finished', 'id': self.task_id, 'success': False, 'error': 'Cancelled'})
+        except Exception as exc:
             emit_json({
-                "type": "finished",
-                "id": self.task_id,
-                "success": False,
-                "error": "Cancelled"
-            })
-        except Exception as e:
-            emit_json({
-                "type": "finished",
-                "id": self.task_id,
-                "success": False,
-                "error": logger.last_error or str(e)
+                'type': 'finished', 'id': self.task_id, 'success': False,
+                'error': logger.last_error or str(exc),
             })
 
 

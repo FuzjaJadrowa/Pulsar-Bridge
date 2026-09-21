@@ -5,6 +5,9 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from yt_dlp.extractor.common import InfoExtractor
+from yt_dlp.networking.exceptions import HTTPError
+from yt_dlp.utils import ExtractorError, smuggle_url
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -217,11 +220,12 @@ def _is_safe_http_url(url):
     return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
 
 
-def resolve_vider_url(url, timeout=10, cookiejar=None):
+def resolve_vider_url(url, timeout=10, cookiejar=None, fetch_text=None):
     if not is_vider_url(url):
         return None
 
     original_url = str(url).strip()
+    fetch_text = fetch_text or _fetch_text
     parsed = urllib.parse.urlparse(original_url)
     original_host = parsed.hostname or "vider.info"
 
@@ -249,7 +253,7 @@ def resolve_vider_url(url, timeout=10, cookiejar=None):
         candidate_embed_url = f"https://{host}/embed/video/{quoted_id}"
 
         try:
-            candidate_embed_html, _, _ = _fetch_text(
+            candidate_embed_html, _, _ = fetch_text(
                 candidate_embed_url,
                 referer=candidate_page_url,
                 timeout=timeout,
@@ -296,7 +300,7 @@ def resolve_vider_url(url, timeout=10, cookiejar=None):
 
     if not title or not thumbnail:
         try:
-            page_html, final_page_url, _ = _fetch_text(
+            page_html, final_page_url, _ = fetch_text(
                 page_url,
                 timeout=timeout,
                 cookiejar=cookiejar,
@@ -340,3 +344,43 @@ def resolve_vider_for_metadata(url, cookiejar=None):
     if not is_vider_url(url):
         return None
     return resolve_vider_url(url, cookiejar=cookiejar)
+
+class ViderIE(InfoExtractor):
+    IE_NAME = 'pulsar:vider'
+    _VALID_URL = r'https?://(?:[\w-]+\.)?vider\.(?:info|pl|love|net)/(?P<id>[^?#]+)'
+
+    def _fetch_text(self, url, *, referer=None, captcha_on_404=False, **kwargs):
+        headers = {'User-Agent': _USER_AGENT}
+        if referer:
+            headers['Referer'] = referer
+        try:
+            page, response = self._download_webpage_handle(url, None, headers=headers)
+        except ExtractorError as exc:
+            status = exc.cause.status if isinstance(exc.cause, HTTPError) else None
+            if captcha_on_404 and status == 404:
+                raise ViderCaptchaRequiredError('Vider requires CAPTCHA for this request.') from exc
+            if status in (403, 429):
+                raise ViderAccessBlockedError(f'Vider access blocked (HTTP {status}).') from exc
+            raise ViderResolveError(str(exc)) from exc
+        if _looks_like_captcha(page):
+            raise ViderCaptchaRequiredError('Vider requires CAPTCHA for this request.')
+        return page, response.url, response.headers
+
+    def _real_extract(self, url):
+        try:
+            jar = self._downloader.cookiejar
+            payload = resolve_vider_url(url, cookiejar=jar if len(jar) else None,
+                                        fetch_text=self._fetch_text)
+        except ViderResolveError as exc:
+            raise ExtractorError(str(exc), expected=True) from exc
+        self.metadata_fallback = payload
+        return {
+            '_type': 'url_transparent', 'ie_key': 'Generic',
+            'url': smuggle_url(payload['media_url'], {
+                'referer': payload['http_headers']['Referer'], 'force_videoid': payload['id'],
+            }),
+            'id': payload['id'], 'title': payload['title'],
+            'thumbnail': payload.get('thumbnail'), 'webpage_url': payload['webpage_url'],
+            'http_headers': payload['http_headers'],
+            'resolver': {'source': 'vider', 'player_host': payload['resolved_host']},
+        }

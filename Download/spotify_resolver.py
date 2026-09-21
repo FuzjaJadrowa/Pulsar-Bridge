@@ -3,6 +3,7 @@ import re
 import urllib.parse
 import urllib.request
 import threading
+from Download.music_extractor import MusicCatalogIE
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 _SPOTIFY_CACHE = {}
@@ -49,9 +50,9 @@ def _fetch_url_text(url, timeout=6):
         return response.read().decode("utf-8", errors="replace"), response.geturl()
 
 
-def _resolve_spotify_redirect(url):
+def _resolve_spotify_redirect(url, fetch_text=_fetch_url_text):
     try:
-        _, final_url = _fetch_url_text(url, timeout=6)
+        _, final_url = fetch_text(url, timeout=6)
         return final_url or url
     except Exception:
         return url
@@ -65,10 +66,14 @@ def _normalize_spotify_path(path):
     return parts
 
 
-def parse_spotify_url(raw_url):
+def parse_spotify_url(raw_url, fetch_text=_fetch_url_text, _seen=None):
     if not raw_url:
         return None
     url = str(raw_url).strip()
+    _seen = set() if _seen is None else _seen
+    if url in _seen or len(_seen) >= 5:
+        return None
+    _seen.add(url)
     allowed_types = {"track", "playlist", "album", "artist", "episode", "show"}
     if url.startswith("spotify:"):
         parts = url.split(":")
@@ -84,10 +89,10 @@ def parse_spotify_url(raw_url):
         return None
 
     host = (parsed.hostname or "").lower()
-    if host.endswith("spotify.link"):
-        return parse_spotify_url(_resolve_spotify_redirect(url))
+    if host == "spotify.link" or host.endswith(".spotify.link"):
+        return parse_spotify_url(_resolve_spotify_redirect(url, fetch_text), fetch_text, _seen)
 
-    if not host.endswith("spotify.com"):
+    if not (host == "spotify.com" or host.endswith(".spotify.com")):
         return None
 
     parts = _normalize_spotify_path(parsed.path)
@@ -129,10 +134,10 @@ def _pick_best_image(sources):
     return best.get("url")
 
 
-def _fetch_spotify_oembed(url):
+def _fetch_spotify_oembed(url, fetch_text=_fetch_url_text):
     try:
         oembed_url = "https://open.spotify.com/oembed?url=" + urllib.parse.quote(url)
-        text, _ = _fetch_url_text(oembed_url, timeout=6)
+        text, _ = fetch_text(oembed_url, timeout=6)
         return json.loads(text)
     except Exception:
         return None
@@ -154,12 +159,12 @@ def _extract_next_data(html):
         return None
 
 
-def _fetch_spotify_embed_entity(item_type, item_id):
+def _fetch_spotify_embed_entity(item_type, item_id, fetch_text=_fetch_url_text):
     if not item_type or not item_id:
         return None
     embed_url = f"https://open.spotify.com/embed/{item_type}/{item_id}"
     try:
-        html, _ = _fetch_url_text(embed_url, timeout=8)
+        html, _ = fetch_text(embed_url, timeout=8)
     except Exception:
         return None
     data = _extract_next_data(html)
@@ -211,18 +216,18 @@ def _build_tracks_from_entity(entity, fallback_url=None):
     return tracks
 
 
-def _build_spotify_payload(raw_url):
-    parsed = parse_spotify_url(raw_url)
+def _build_spotify_payload(raw_url, fetch_text=_fetch_url_text, use_cache=True):
+    parsed = parse_spotify_url(raw_url, fetch_text)
     if not parsed:
         return None
 
     canonical_url = parsed["url"]
-    cached = _cache_get(canonical_url)
+    cached = _cache_get(canonical_url) if use_cache else None
     if cached:
         return cached
 
-    oembed = _fetch_spotify_oembed(canonical_url) if canonical_url else None
-    entity = _fetch_spotify_embed_entity(parsed["type"], parsed["id"])
+    oembed = _fetch_spotify_oembed(canonical_url, fetch_text) if canonical_url else None
+    entity = _fetch_spotify_embed_entity(parsed["type"], parsed["id"], fetch_text)
 
     title = None
     author = None
@@ -267,7 +272,8 @@ def _build_spotify_payload(raw_url):
         "thumbnail": thumbnail,
         "tracks": tracks
     }
-    _cache_set(canonical_url, payload)
+    if use_cache:
+        _cache_set(canonical_url, payload)
     return payload
 
 
@@ -318,3 +324,11 @@ def resolve_spotify_for_metadata(url):
         "spotify": payload,
         "yt_query": queries[0] if queries else None
     }
+
+class SpotifyIE(MusicCatalogIE):
+    IE_NAME = 'pulsar:spotify'
+    _VALID_URL = r'(?:spotify:(?:track|album|playlist|artist|episode|show):[A-Za-z0-9]+|https?://(?:[\w-]+\.)?(?:spotify\.com|spotify\.link)/[^\s]+)'
+    _SOURCE = 'spotify'
+
+    def _catalog_payload(self, url):
+        return _build_spotify_payload(url, fetch_text=self._fetch_text, use_cache=False)

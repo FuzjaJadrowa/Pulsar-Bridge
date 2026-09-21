@@ -2,6 +2,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from Download.music_extractor import MusicCatalogIE
 
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 _MAX_TRACKS = 200
@@ -34,9 +35,9 @@ def _fetch_url(url, timeout=6):
         return response.geturl()
 
 
-def _resolve_redirect(url):
+def _resolve_redirect(url, fetch_url=_fetch_url):
     try:
-        final_url = _fetch_url(url, timeout=6)
+        final_url = fetch_url(url, timeout=6)
         return final_url or url
     except Exception:
         return url
@@ -65,13 +66,13 @@ def _extract_deezer_url_from_query(parsed):
     return None
 
 
-def parse_deezer_url(raw_url, _seen=None):
+def parse_deezer_url(raw_url, _seen=None, fetch_url=_fetch_url):
     if not raw_url:
         return None
     url = str(raw_url).strip()
     if _seen is None:
         _seen = set()
-    if url in _seen:
+    if url in _seen or len(_seen) >= 5:
         return None
     _seen.add(url)
     try:
@@ -80,16 +81,16 @@ def parse_deezer_url(raw_url, _seen=None):
         return None
 
     host = (parsed.hostname or "").lower()
-    if host.endswith("deezer.page.link") or host.endswith("dzr.page.link") or host.endswith("link.deezer.com") or host.endswith("dzr.fm"):
+    if host in ("deezer.page.link", "dzr.page.link", "link.deezer.com", "dzr.fm"):
         decoded = _extract_deezer_url_from_query(parsed)
         if decoded:
-            return parse_deezer_url(decoded, _seen)
-        resolved = _resolve_redirect(url)
+            return parse_deezer_url(decoded, _seen, fetch_url)
+        resolved = _resolve_redirect(url, fetch_url)
         if resolved and resolved != url:
-            return parse_deezer_url(resolved, _seen)
+            return parse_deezer_url(resolved, _seen, fetch_url)
         return None
 
-    if not host.endswith("deezer.com"):
+    if not (host == "deezer.com" or host.endswith(".deezer.com")):
         return None
 
     parts = _normalize_deezer_path(parsed.path)
@@ -109,12 +110,14 @@ def _extract_trailing_id(value):
     return match.group(1) if match else None
 
 
-def _fetch_tracklist(url):
+def _fetch_tracklist(url, fetch_json=_fetch_json):
     tracks = []
     next_url = url
-    while next_url and len(tracks) < _MAX_TRACKS:
+    seen = set()
+    while next_url and next_url not in seen and len(tracks) < _MAX_TRACKS:
+        seen.add(next_url)
         try:
-            data, _ = _fetch_json(next_url, timeout=8)
+            data, _ = fetch_json(next_url, timeout=8)
         except Exception:
             break
         batch = data.get("data") or []
@@ -138,7 +141,7 @@ def _build_track_payload(item):
     }
 
 
-def _build_payload(parsed):
+def _build_payload(parsed, fetch_json=_fetch_json):
     if not parsed:
         return None
     item_type = parsed["type"]
@@ -147,7 +150,7 @@ def _build_payload(parsed):
 
     if item_type == "track":
         try:
-            track, _ = _fetch_json(f"https://api.deezer.com/track/{item_id}")
+            track, _ = fetch_json(f"https://api.deezer.com/track/{item_id}")
         except Exception:
             return None
         payload_track = _build_track_payload(track)
@@ -163,13 +166,13 @@ def _build_payload(parsed):
 
     if item_type == "album":
         try:
-            album, _ = _fetch_json(f"https://api.deezer.com/album/{item_id}")
+            album, _ = fetch_json(f"https://api.deezer.com/album/{item_id}")
         except Exception:
             return None
         tracks_data = album.get("tracks", {}).get("data") or []
         tracklist_url = album.get("tracklist")
         if tracklist_url and len(tracks_data) < album.get("nb_tracks", 0):
-            tracks_data = _fetch_tracklist(tracklist_url)
+            tracks_data = _fetch_tracklist(tracklist_url, fetch_json)
         tracks = [_build_track_payload(item) for item in tracks_data]
         tracks = [t for t in tracks if t]
         return {
@@ -184,13 +187,13 @@ def _build_payload(parsed):
 
     if item_type == "playlist":
         try:
-            playlist, _ = _fetch_json(f"https://api.deezer.com/playlist/{item_id}")
+            playlist, _ = fetch_json(f"https://api.deezer.com/playlist/{item_id}")
         except Exception:
             return None
         tracks_data = playlist.get("tracks", {}).get("data") or []
         tracklist_url = playlist.get("tracklist")
         if tracklist_url and (playlist.get("nb_tracks", 0) > len(tracks_data)):
-            tracks_data = _fetch_tracklist(tracklist_url)
+            tracks_data = _fetch_tracklist(tracklist_url, fetch_json)
         tracks = [_build_track_payload(item) for item in tracks_data]
         tracks = [t for t in tracks if t]
         creator = playlist.get("creator") or {}
@@ -255,3 +258,13 @@ def resolve_deezer_for_metadata(url):
         "deezer": payload,
         "yt_query": queries[0] if queries else None
     }
+
+
+class DeezerIE(MusicCatalogIE):
+    IE_NAME = 'pulsar:deezer'
+    _VALID_URL = r'https?://(?:(?:[\w-]+\.)?deezer\.com|deezer\.page\.link|dzr\.page\.link|dzr\.fm)/[^\s]+'
+    _SOURCE = 'deezer'
+
+    def _catalog_payload(self, url):
+        parsed = parse_deezer_url(url, fetch_url=self._fetch_redirect)
+        return _build_payload(parsed, fetch_json=self._fetch_json)
