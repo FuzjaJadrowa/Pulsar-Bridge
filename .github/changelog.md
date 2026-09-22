@@ -1,3 +1,2 @@
-# Build 26
-- Added icon for built app.
-- Changed custom extractors to normal info extractors managed by yt-dlp.
+# Build 27
+- Bumped python version from 3.10 to 3.14.
