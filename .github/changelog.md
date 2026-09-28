@@ -1,2 +1,2 @@
-# Build 27
-- Bumped python version from 3.10 to 3.14.
+# Build 28
+- Enhanced spotify resolver by adding additional fallbacks and secure error when resolver didn't find anything.

@@ -210,6 +210,7 @@ def _build_tracks_from_entity(entity, fallback_url=None):
             tracks.append({
                 "title": title,
                 "artist": artist,
+                "artists": artist_names,
                 "duration_ms": duration,
                 "spotify_url": track_url
             })
@@ -260,7 +261,7 @@ def _build_spotify_payload(raw_url, fetch_text=_fetch_url_text, use_cache=True):
                 thumbnail = _pick_best_image(entity["coverArt"]["sources"])
 
     tracks = _build_tracks_from_entity(entity, canonical_url)
-    if not tracks and title:
+    if not tracks and title and parsed['type'] == 'track':
         tracks = [{"title": title, "artist": author, "duration_ms": None, "spotify_url": canonical_url}]
 
     payload = {
