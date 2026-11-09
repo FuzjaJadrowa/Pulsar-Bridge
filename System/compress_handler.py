@@ -105,11 +105,15 @@ class CompressHandler:
 
             ret = run_ffmpeg_with_progress(self.task_id, ffmpeg_path, ffmpeg_args, on_progress)
             if ret != 0:
+                detail = getattr(ret, "stderr", "").strip()
+                error = f"FFmpeg compression failed (exit code {int(ret)})."
+                if detail:
+                    error = f"{error} {detail[-3000:]}"
                 _emit({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "FFmpeg compression failed."
+                    "error": error
                 })
                 return
 

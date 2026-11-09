@@ -1,4 +1,5 @@
 import subprocess
+from collections import deque
 import threading
 import time
 from System.utils import emit_json
@@ -38,6 +39,12 @@ def kill_all_ffmpeg():
         except Exception:
             pass
 
+class FFmpegResult(int):
+    def __new__(cls, returncode, stderr=""):
+        result = int.__new__(cls, returncode)
+        result.stderr = stderr
+        return result
+
 def _parse_progress_line(line):
     data = {}
     for raw in line.splitlines():
@@ -69,9 +76,11 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
         proc.kill()
         return 1
 
+    stderr_output = deque(maxlen=128)
+
     def consume_stderr():
-        for _ in proc.stderr:
-            pass
+        for line in proc.stderr:
+            stderr_output.append(line)
 
     stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
     stderr_thread.start()
@@ -85,7 +94,9 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
             break
 
     try:
-        return proc.wait(timeout=timeout)
+        returncode = proc.wait(timeout=timeout)
+        stderr_thread.join(timeout=1)
+        return FFmpegResult(returncode, "".join(stderr_output)[-4000:])
     finally:
         kill_ffmpeg_for_task(task_id)
 
@@ -109,7 +120,7 @@ def run_ffmpeg_with_progress(task_id, ffmpeg_path, args, progress_callback):
             if proc is None and not registered:
                 raise RuntimeError("FFmpeg process not attached.")
             ret = proc.returncode if proc is not None else 0
-            return ret
+            return FFmpegResult(ret)
         except Exception:
             pass
         finally:
