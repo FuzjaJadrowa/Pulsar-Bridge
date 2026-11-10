@@ -79,10 +79,7 @@ class DownloadHandler:
     def run(self, args_list):
         logger = BridgeLogger(self.task_id)
         try:
-            extra_args = ["--remote-components", "ejs:github"]
-            final_args = extra_args + args_list
-
-            parsed_args = yt_dlp.parse_options(final_args)
+            parsed_args = yt_dlp.parse_options(args_list)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
             if 'progress_hooks' not in ydl_opts:
@@ -218,7 +215,7 @@ class DownloadMetadataHandler:
     def run(self, args):
         logger = BridgeLogger(self.task_id)
         try:
-            parsed_args = yt_dlp.parse_options(["--remote-components", "ejs:github"] + args)
+            parsed_args = yt_dlp.parse_options(args)
             urls, ydl_opts = parsed_args[2], parsed_args[3]
             if not urls:
                 raise Exception("No URL provided for metadata")
@@ -312,10 +309,7 @@ class SearchHandler:
     def run(self, args):
         logger = BridgeLogger(self.task_id)
         try:
-            extra_args = ["--remote-components", "ejs:github"]
-            final_args = extra_args + args
-
-            parsed_args = yt_dlp.parse_options(final_args)
+            parsed_args = yt_dlp.parse_options(args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 

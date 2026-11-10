@@ -1,4 +1,5 @@
 yt-dlp==2026.10.26
+yt-dlp-ejs==0.8.0
 pyinstaller
 ytmusicapi>=1.6.0
 hachoir==3.3.0
