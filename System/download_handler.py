@@ -144,6 +144,7 @@ class DownloadMetadataHandler:
                     'format_id': f.get('format_id'),
                     'ext': f.get('ext'),
                     'resolution': f.get('resolution'),
+                    'fps': f.get('fps'),
                     'filesize': f.get('filesize'),
                     'filesize_approx': f.get('filesize_approx'),
                     'vcodec': f.get('vcodec'),
