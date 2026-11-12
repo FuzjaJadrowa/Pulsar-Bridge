@@ -1,5 +1,7 @@
 import yt_dlp
 import json
+import os
+import shlex
 from features.download.ytmusic_search import YTMusicSearchHandler
 from core.ffmpeg.popen_patch import patch_ffmpeg_popen_for_progress
 from features.download.extractors import create_resolver_ydl, metadata_fallback
@@ -56,14 +58,15 @@ class DownloadHandler:
             msg = {
                 "type": "progress",
                 "id": self.task_id,
-                "percent": round(percent, 2),
+                "percent": round(percent * (0.70 if getattr(self, 'has_transcode', False) else 1.0), 2),
                 "eta": eta,
                 "eta_seconds": eta,
                 "speed": d.get('speed', 0) or 0,
                 "filename": d.get('filename', ''),
                 "item_index": item_index,
                 "item_count": item_count,
-                "status": "downloading"
+                "status": "downloading",
+                "stage": "downloading"
             }
             emit_json(msg)
 
@@ -71,7 +74,8 @@ class DownloadHandler:
             emit_json({
                 "type": "status",
                 "id": self.task_id,
-                "msg": "File downloaded, starting post-processing..."
+                "msg": "File downloaded, starting post-processing...",
+                "stage": "converting"
             })
             if self.expected_playlist_count and self.current_playlist_index < self.expected_playlist_count:
                 self.current_playlist_index += 1
@@ -82,6 +86,7 @@ class DownloadHandler:
             parsed_args = yt_dlp.parse_options(args_list)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
+            self.has_transcode = any(arg in args_list for arg in ('--recode-video', '-x', '--audio-format', '--postprocessor-args'))
             if 'progress_hooks' not in ydl_opts:
                 ydl_opts['progress_hooks'] = []
             ydl_opts['progress_hooks'].append(self._progress_hook)
@@ -90,7 +95,7 @@ class DownloadHandler:
             ydl_opts['no_color'] = True
             ydl_opts['ignoreerrors'] = False
 
-            with patch_ffmpeg_popen_for_progress(self.task_id):
+            with patch_ffmpeg_popen_for_progress(self.task_id, self.has_transcode):
                 with create_resolver_ydl(ydl_opts) as ydl:
                     retcode = ydl.download(urls)
 
@@ -120,6 +125,98 @@ class DownloadHandler:
                 "success": False,
                 "error": error_msg
             })
+
+    def run_ffmpeg_direct(self, args_list):
+        from core.ffmpeg.runner import run_ffmpeg_with_progress
+
+        logger = BridgeLogger(self.task_id)
+        try:
+            parsed = yt_dlp.parse_options(args_list)
+            urls, ydl_opts = parsed[2], parsed[3]
+            if not urls:
+                raise ValueError("No URL provided")
+            ydl_opts.update({'quiet': True, 'no_warnings': True, 'logger': logger, 'skip_download': True})
+            ffmpeg_path = ydl_opts.get('ffmpeg_location') or 'ffmpeg'
+            selector_spec = ydl_opts.get('format') or 'bestvideo+bestaudio/best'
+            output_template = ydl_opts.get('outtmpl') or '%(title)s [%(id)s].%(ext)s'
+            with create_resolver_ydl(ydl_opts) as ydl:
+                info = ydl.extract_info(urls[0], download=False)
+                if not info:
+                    raise ValueError("Could not resolve media metadata")
+                if info.get('_type') in ('playlist', 'multi_video'):
+                    emit_json({'type': 'status', 'id': self.task_id, 'stage': 'downloading', 'msg': 'Using yt-dlp for playlist compatibility'})
+                    return self.run(args_list)
+                selected = list(ydl.build_format_selector(selector_spec)(info))
+                if not selected:
+                    raise ValueError("No matching formats found")
+                chosen = selected[0]
+                inputs = chosen.get('requested_formats') or [chosen]
+                prepared_info = dict(info)
+                prepared_info.update(chosen)
+                output_path = ydl.prepare_filename(prepared_info)
+                target_ext = None
+                for index, arg in enumerate(args_list[:-1]):
+                    if arg == '--recode-video':
+                        target_ext = args_list[index + 1]
+                    elif arg == '--audio-format':
+                        audio_ext = args_list[index + 1]
+                        target_ext = {'vorbis': 'ogg', 'alac': 'm4a', 'aac': 'm4a', 'mp3': 'mp3', 'opus': 'opus', 'flac': 'flac', 'wav': 'wav'}.get(audio_ext, audio_ext)
+                if target_ext:
+                    stem, _ = os.path.splitext(output_path)
+                    output_path = f"{stem}.{target_ext}"
+                os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+
+                command_args = ['-hide_banner', '-y']
+                for fmt in inputs:
+                    headers = fmt.get('http_headers') or {}
+                    if headers:
+                        command_args.extend(['-headers', ''.join(f'{key}: {value}\r\n' for key, value in headers.items())])
+                    command_args.extend(['-i', fmt.get('url') or fmt.get('manifest_url') or ''])
+                if len(inputs) > 1:
+                    command_args.extend(['-map', '0:v:0?', '-map', '1:a:0?'])
+                else:
+                    command_args.extend(['-map', '0:v:0?', '-map', '0:a:0?'])
+                if '-x' in args_list:
+                    command_args.append('-vn')
+                if '--audio-quality' in args_list:
+                    quality_index = args_list.index('--audio-quality')
+                    if quality_index + 1 < len(args_list):
+                        command_args.extend(['-b:a', args_list[quality_index + 1]])
+
+                extra = []
+                for index, arg in enumerate(args_list[:-1]):
+                    if arg == '--postprocessor-args':
+                        value = args_list[index + 1]
+                        if ':' in value:
+                            value = value.split(':', 1)[1]
+                        extra.extend(shlex.split(value))
+                command_args.extend(extra)
+                command_args.append(output_path)
+
+                duration = float(info.get('duration') or 0)
+                def on_progress(data):
+                    percent, eta = 0.0, None
+                    elapsed = data.get('out_time')
+                    if duration > 0 and elapsed:
+                        try:
+                            h, m, s = elapsed.split(':')
+                            seconds = int(h) * 3600 + int(m) * 60 + float(s)
+                            percent = min(100.0, seconds * 100 / duration)
+                            speed = float(str(data.get('speed', '0x')).rstrip('x'))
+                            eta = max(0.0, (duration - seconds) / speed) if speed > 0 else None
+                        except (ValueError, TypeError):
+                            pass
+                    payload = {'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting', 'percent': percent}
+                    if eta is not None:
+                        payload['eta_seconds'] = eta
+                    emit_json(payload)
+
+                result = run_ffmpeg_with_progress(self.task_id, ffmpeg_path, command_args, on_progress)
+                if result != 0:
+                    raise RuntimeError(getattr(result, 'stderr', '') or f'FFmpeg exited with code {result}')
+                emit_json({'type': 'finished', 'id': self.task_id, 'success': True, 'filepath': output_path})
+        except Exception as exc:
+            emit_json({'type': 'finished', 'id': self.task_id, 'success': False, 'error': str(exc)})
 
 class DownloadMetadataHandler:
     def __init__(self, task_id):

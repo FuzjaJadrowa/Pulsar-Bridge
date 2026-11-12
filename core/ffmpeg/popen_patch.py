@@ -17,6 +17,8 @@ _thread_local = threading.local()
 _original_popen = yt_external.Popen
 _is_patched = False
 _patch_lock = threading.Lock()
+_task_transcodes = set()
+_task_transcodes_lock = threading.Lock()
 
 def kill_processes_for_task(task_id):
     with _popens_lock:
@@ -112,6 +114,11 @@ class GlobalBridgeFFmpegPopen(_original_popen):
                 "id": self.task_id,
                 "status": "processing",
             }
+            with _task_transcodes_lock:
+                has_transcode = self.task_id in _task_transcodes
+            if has_transcode and "percent" in ffmpeg_data:
+                ffmpeg_data["percent"] = str(70.0 + float(ffmpeg_data["percent"]) * 0.30)
+                ffmpeg_data["stage"] = "converting"
             payload.update(ffmpeg_data)
             emit_json(payload)
 
@@ -148,11 +155,16 @@ def _ensure_patched():
             _is_patched = True
 
 @contextmanager
-def patch_ffmpeg_popen_for_progress(task_id):
+def patch_ffmpeg_popen_for_progress(task_id, has_transcode=False):
     _ensure_patched()
     _thread_local.task_id = task_id
+    if has_transcode:
+        with _task_transcodes_lock:
+            _task_transcodes.add(task_id)
     try:
         yield
     finally:
         _thread_local.task_id = None
+        with _task_transcodes_lock:
+            _task_transcodes.discard(task_id)
         kill_processes_for_task(task_id)

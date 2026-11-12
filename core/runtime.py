@@ -215,7 +215,7 @@ def main():
                                "message": "Command must be a string"})
                     continue
 
-                task_commands = ("download", "metadata_d", "metadata_c", "metadata", "convert", "compress", "search")
+                task_commands = ("download", "download_ffmpeg", "metadata_d", "metadata_c", "metadata", "convert", "compress", "search")
                 if command in task_commands:
                     args = data.get("args", [])
                     payload = data.get("payload", None)
@@ -235,6 +235,9 @@ def main():
                     if command == "download":
                         handler = DownloadHandler(task_id)
                         t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
+                    elif command == "download_ffmpeg":
+                        handler = DownloadHandler(task_id)
+                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run_ffmpeg_direct, args), daemon=True)
                     elif command in ("metadata_d", "metadata"):
                         handler = DownloadMetadataHandler(task_id)
                         t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
