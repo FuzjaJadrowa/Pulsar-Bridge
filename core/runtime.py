@@ -87,7 +87,8 @@ class RateLimitedStdout:
 
     def clear_task(self, task_id):
         with self.lock:
-            self.next_allowed.pop(task_id, None)
+            for key in [key for key in self.next_allowed if key[0] == task_id]:
+                self.next_allowed.pop(key, None)
 
     def _should_throttle(self, payload):
         task_id = payload.get("id")
@@ -96,13 +97,20 @@ class RateLimitedStdout:
         msg_type = payload.get("type")
         if msg_type not in self.throttled_types:
             return False
-        if msg_type == "log" and str(payload.get("level", "")).lower() == "error":
+        if msg_type == "log" and str(payload.get("level", "")).lower() in ("warning", "error"):
             return False
+        if msg_type == "progress":
+            try:
+                if float(payload.get("percent", 0)) >= 100:
+                    return False
+            except (TypeError, ValueError):
+                pass
         now = time.monotonic()
-        next_allowed = self.next_allowed.get(task_id, 0.0)
+        throttle_key = (task_id, msg_type)
+        next_allowed = self.next_allowed.get(throttle_key, 0.0)
         if now < next_allowed:
             return True
-        self.next_allowed[task_id] = now + self.min_interval
+        self.next_allowed[throttle_key] = now + self.min_interval
         return False
 
     def write(self, data):
@@ -190,21 +198,39 @@ def main():
 
     try:
         for line in sys.stdin:
+            task_id = None
             try:
                 if not line.strip():
                     continue
 
                 data = json.loads(line)
+                if not isinstance(data, dict):
+                    emit_json({"type": "error", "message": "Command must be a JSON object"})
+                    continue
+
                 command = data.get("command")
                 task_id = data.get("id")
+                if not isinstance(command, str):
+                    emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
+                               "message": "Command must be a string"})
+                    continue
 
-                if command in ("download", "metadata_d", "metadata_c", "metadata", "convert", "compress", "search"):
-                    if not task_id:
-                        emit_json({"type": "error", "message": "No ID provided"})
-                        continue
-
+                task_commands = ("download", "metadata_d", "metadata_c", "metadata", "convert", "compress", "search")
+                if command in task_commands:
                     args = data.get("args", [])
                     payload = data.get("payload", None)
+                    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                        emit_json({"type": "error", "id": task_id, "message": "Args must be a list of strings"})
+                        continue
+                    if payload is not None and not isinstance(payload, dict):
+                        emit_json({"type": "error", "id": task_id, "message": "Payload must be a JSON object"})
+                        continue
+
+                    with active_tasks_lock:
+                        existing = active_tasks.get(task_id)
+                        if existing and existing.is_alive():
+                            emit_json({"type": "error", "id": task_id, "message": "A task with this ID is already running"})
+                            continue
 
                     if command == "download":
                         handler = DownloadHandler(task_id)
@@ -226,31 +252,40 @@ def main():
                         t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
 
                     with active_tasks_lock:
+                        existing = active_tasks.get(task_id)
+                        if existing and existing.is_alive():
+                            emit_json({"type": "error", "id": task_id, "message": "A task with this ID is already running"})
+                            continue
                         active_tasks[task_id] = t
-                    t.start()
+                        try:
+                            t.start()
+                        except Exception:
+                            active_tasks.pop(task_id, None)
+                            raise
 
                 elif command == "cancel":
                     kill_processes_for_task(task_id)
                     with active_tasks_lock:
                         thread = active_tasks.get(task_id)
-                        if thread:
-                            active_tasks.pop(task_id, None)
                     if rate_limited_stdout:
                         rate_limited_stdout.clear_task(task_id)
                     if thread and thread.is_alive():
                         thread.terminate()
                         emit_json({"type": "cancelled", "id": task_id})
                     else:
-                        emit_json({"type": "error", "message": "Task not found"})
+                        emit_json({"type": "error", "id": task_id, "message": "Task not found"})
 
                 elif command == "exit":
                     break
+                else:
+                    emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
+                               "message": f"Unknown command: {command}"})
 
             except json.JSONDecodeError:
                 emit_json({"type": "error", "message": "Invalid JSON"})
             except Exception as e:
-                msg = f"Global Error: {str(e)}\n{traceback.format_exc()}"
-                emit_json({"type": "error", "message": msg})
+                emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
+                           "message": str(e)})
     finally:
         with active_tasks_lock:
             active_ids = list(active_tasks.keys())

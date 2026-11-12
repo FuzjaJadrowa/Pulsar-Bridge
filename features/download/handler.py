@@ -230,6 +230,7 @@ class DownloadMetadataHandler:
                 ydl_opts.update({'extract_flat': 'in_playlist', 'playlistend': 1, 'playlist_items': '1'})
 
             with create_resolver_ydl(ydl_opts) as ydl:
+                extraction_error = None
                 try:
                     info = self._ensure_full_info(ydl, ydl.extract_info(urls[0], download=False))
                     if not info:
@@ -237,15 +238,16 @@ class DownloadMetadataHandler:
                     force_subs = any(info.get(source) for source in ('spotify', 'apple_music', 'deezer'))
                     minimized_info = self._filter_metadata(ydl.sanitize_info(info), force_subtitle_langs=force_subs)
                 except Exception as exc:
-                    fallback = metadata_fallback(ydl, urls[0])
-                    if not fallback:
-                        raise
-                    minimized_info = {
-                        'formats': [], 'subtitles_langs': [], 'auto_captions_langs': [],
-                        'resolver_warning': logger.last_error or str(exc),
-                    }
+                    extraction_error = exc
 
                 fallback = metadata_fallback(ydl, urls[0])
+                if extraction_error is not None:
+                    if not fallback:
+                        raise extraction_error
+                    minimized_info = {
+                        'formats': [], 'subtitles_langs': [], 'auto_captions_langs': [],
+                        'resolver_warning': logger.last_error or str(extraction_error),
+                    }
                 if fallback:
                     for field in ('id', 'title', 'thumbnail', 'webpage_url', 'description', 'duration'):
                         if fallback.get(field) is not None:

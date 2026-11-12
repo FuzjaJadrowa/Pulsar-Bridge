@@ -21,8 +21,10 @@ except Exception:
 
 try:
     from PIL import Image
+    from PIL import ImageSequence
 except Exception:
     Image = None
+    ImageSequence = None
 
 try:
     import pillow_heif
@@ -749,6 +751,8 @@ class ConvertHandler:
             if output_format == "svg":
                 progress.emit(0, force=True)
                 with Image.open(input_path) as img:
+                    if getattr(img, "is_animated", False):
+                        raise Exception("Animated images cannot be converted to SVG without losing frames.")
                     progress.emit(15)
                     original_size = img.size
                     target_width = self._parse_int(payload.get("image_width"))
@@ -818,18 +822,45 @@ class ConvertHandler:
                 target_width = self._parse_int(payload.get("image_width"))
                 target_height = self._parse_int(payload.get("image_height"))
                 target_size = self._resolve_target_size(original_size, target_width, target_height)
-                if target_size != original_size:
-                    img = img.resize(target_size, Image.LANCZOS)
-                    progress.emit(55)
-                else:
-                    progress.emit(35)
-
-                if target_format in ("JPEG", "JPG"):
-                    img = self._ensure_rgb(img)
-
                 save_kwargs = self._build_save_kwargs(target_format, payload.get("image_quality"), target_size)
+                frame_count = int(getattr(img, "n_frames", 1))
+                if frame_count > 1 and target_format not in Image.SAVE_ALL:
+                    raise Exception(f"{output_format.upper()} does not support animated image output.")
+
+                frames = []
+                durations = []
+                if frame_count > 1:
+                    for frame in ImageSequence.Iterator(img):
+                        current = frame.copy()
+                        if current.size != target_size:
+                            current = current.resize(target_size, Image.LANCZOS)
+                        if target_format in ("JPEG", "JPG"):
+                            current = self._ensure_rgb(current)
+                        frames.append(current)
+                        durations.append(frame.info.get("duration", img.info.get("duration", 0)))
+                else:
+                    current = img.copy()
+                    if current.size != target_size:
+                        current = current.resize(target_size, Image.LANCZOS)
+                    if target_format in ("JPEG", "JPG"):
+                        current = self._ensure_rgb(current)
+
+                progress.emit(55 if target_size != original_size else 35)
                 progress.emit(80)
-                img.save(output_path, format=target_format, **save_kwargs)
+                if frame_count > 1:
+                    save_kwargs["save_all"] = True
+                    save_kwargs["append_images"] = frames[1:]
+                    if target_format in ("GIF", "PNG", "WEBP"):
+                        save_kwargs["duration"] = durations
+                        if "loop" in img.info:
+                            save_kwargs["loop"] = img.info["loop"]
+                    try:
+                        frames[0].save(output_path, format=target_format, **save_kwargs)
+                    finally:
+                        for frame in frames:
+                            frame.close()
+                else:
+                    current.save(output_path, format=target_format, **save_kwargs)
                 progress.emit(100, force=True)
 
             _emit({
