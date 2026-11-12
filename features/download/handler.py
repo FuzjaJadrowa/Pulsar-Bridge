@@ -2,6 +2,7 @@ import yt_dlp
 import json
 import os
 import shlex
+import types
 from features.download.ytmusic_search import YTMusicSearchHandler
 from core.ffmpeg.popen_patch import patch_ffmpeg_popen_for_progress
 from features.download.extractors import create_resolver_ydl, metadata_fallback
@@ -80,6 +81,42 @@ class DownloadHandler:
             if self.expected_playlist_count and self.current_playlist_index < self.expected_playlist_count:
                 self.current_playlist_index += 1
 
+    @staticmethod
+    def _force_same_container_video_encode(ydl):
+        try:
+            from yt_dlp.postprocessor.ffmpeg import FFmpegVideoConvertorPP, resolve_mapping
+        except ImportError:
+            return
+
+        for postprocessor in ydl._pps.get('post_process', []):
+            if not isinstance(postprocessor, FFmpegVideoConvertorPP):
+                continue
+
+            original_run = postprocessor.run
+
+            def run_with_same_ext_encode(processor, info, _original=original_run):
+                source_ext = str(info.get('ext') or '').lower()
+                target_ext, _ = resolve_mapping(source_ext, processor.mapping)
+                if not source_ext or target_ext != source_ext or info.get('requested_formats'):
+                    return _original(info)
+
+                source_path = info.get('filepath')
+                if not source_path or not os.path.isfile(source_path):
+                    return _original(info)
+
+                stem, _ = os.path.splitext(source_path)
+                temp_path = f'{stem}.pulsar-tmp.{target_ext}'
+                try:
+                    processor.run_ffmpeg(source_path, temp_path, processor._options(target_ext))
+                    os.replace(temp_path, source_path)
+                    return [], info
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+
+            postprocessor.run = types.MethodType(run_with_same_ext_encode, postprocessor)
+            return
+
     def run(self, args_list):
         logger = BridgeLogger(self.task_id)
         try:
@@ -97,11 +134,21 @@ class DownloadHandler:
 
             with patch_ffmpeg_popen_for_progress(self.task_id, self.has_transcode):
                 with create_resolver_ydl(ydl_opts) as ydl:
+                    self._force_same_container_video_encode(ydl)
                     retcode = ydl.download(urls)
 
             if retcode != 0:
                 raise Exception(f"yt-dlp exited with error code {retcode}")
 
+            emit_json({
+                "type": "progress",
+                "id": self.task_id,
+                "percent": 100.0,
+                "eta": 0,
+                "eta_seconds": 0,
+                "status": "completed",
+                "stage": "completed"
+            })
             emit_json({
                 "type": "finished",
                 "id": self.task_id,
@@ -136,6 +183,9 @@ class DownloadHandler:
             if not urls:
                 raise ValueError("No URL provided")
             ydl_opts.update({'quiet': True, 'no_warnings': True, 'logger': logger, 'skip_download': True})
+            if ydl_opts.get('cookiesfrombrowser') or ydl_opts.get('cookiefile'):
+                emit_json({'type': 'status', 'id': self.task_id, 'stage': 'downloading', 'msg': 'Using yt-dlp to preserve cookie authentication'})
+                return self.run(args_list)
             ffmpeg_path = ydl_opts.get('ffmpeg_location') or 'ffmpeg'
             selector_spec = ydl_opts.get('format') or 'bestvideo+bestaudio/best'
             output_template = ydl_opts.get('outtmpl') or '%(title)s [%(id)s].%(ext)s'
@@ -167,6 +217,9 @@ class DownloadHandler:
                 os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
                 command_args = ['-hide_banner', '-y']
+                proxy = ydl_opts.get('proxy')
+                if proxy:
+                    command_args.extend(['-http_proxy', str(proxy)])
                 for fmt in inputs:
                     headers = fmt.get('http_headers') or {}
                     if headers:
@@ -193,20 +246,38 @@ class DownloadHandler:
                 command_args.extend(extra)
                 command_args.append(output_path)
 
-                duration = float(info.get('duration') or 0)
+                duration = float(info.get('duration') or max((float(fmt.get('duration') or 0) for fmt in inputs), default=0))
                 def on_progress(data):
-                    percent, eta = 0.0, None
-                    elapsed = data.get('out_time')
-                    if duration > 0 and elapsed:
+                    percent, eta = None, None
+                    progress_duration = duration or float(data.get('duration_seconds') or 0)
+                    elapsed = data.get('out_time') or data.get('time')
+                    if elapsed is None:
+                        elapsed_ms = data.get('out_time_us', data.get('out_time_ms'))
                         try:
-                            h, m, s = elapsed.split(':')
+                            seconds = float(elapsed_ms) / 1_000_000.0
+                            elapsed = seconds
+                        except (ValueError, TypeError):
+                            elapsed = None
+                    try:
+                        if isinstance(elapsed, (int, float)):
+                            seconds = float(elapsed)
+                        elif elapsed:
+                            h, m, s = str(elapsed).split(':')
                             seconds = int(h) * 3600 + int(m) * 60 + float(s)
-                            percent = min(100.0, seconds * 100 / duration)
+                        else:
+                            seconds = None
+                    except (ValueError, TypeError):
+                        seconds = None
+                    if progress_duration > 0 and seconds is not None:
+                        percent = min(100.0, max(0.0, seconds * 100.0 / progress_duration))
+                        try:
                             speed = float(str(data.get('speed', '0x')).rstrip('x'))
-                            eta = max(0.0, (duration - seconds) / speed) if speed > 0 else None
+                            eta = max(0.0, (progress_duration - seconds) / speed) if speed > 0 else None
                         except (ValueError, TypeError):
                             pass
-                    payload = {'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting', 'percent': percent}
+                    payload = {'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting'}
+                    if percent is not None:
+                        payload['percent'] = percent
                     if eta is not None:
                         payload['eta_seconds'] = eta
                     emit_json(payload)
@@ -214,6 +285,7 @@ class DownloadHandler:
                 result = run_ffmpeg_with_progress(self.task_id, ffmpeg_path, command_args, on_progress)
                 if result != 0:
                     raise RuntimeError(getattr(result, 'stderr', '') or f'FFmpeg exited with code {result}')
+                emit_json({'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting', 'percent': 100.0, 'eta_seconds': 0})
                 emit_json({'type': 'finished', 'id': self.task_id, 'success': True, 'filepath': output_path})
         except Exception as exc:
             emit_json({'type': 'finished', 'id': self.task_id, 'success': False, 'error': str(exc)})

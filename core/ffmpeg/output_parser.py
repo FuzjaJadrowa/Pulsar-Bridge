@@ -3,14 +3,8 @@ from typing import Dict, Optional
 
 class FFMpegOutputParser:
     _DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
-    _PROGRESS_PATTERN = re.compile(
-        r"frame=\s*(?P<frame>\d+)"
-        r"(?:\s+fps=\s*(?P<fps>[\d.]+))?"
-        r"(?:\s+q=\s*(?P<q>-?[\d.]+))?"
-        r"(?:\s+size=\s*(?P<size>\S+))?"
-        r"\s+time=(?P<time>\d{2}:\d{2}:\d{2}\.\d+)"
-        r"(?:\s+bitrate=\s*(?P<bitrate>[^\s]+))?"
-        r"(?:\s+speed=\s*(?P<speed>[^\s]+))?"
+    _PROGRESS_FIELDS = re.compile(
+        r"(?:^|\s)(?P<key>frame|fps|q|size|Lsize|time|bitrate|speed)=\s*(?P<value>[^\s]+)"
     )
 
     def __init__(self):
@@ -24,14 +18,18 @@ class FFMpegOutputParser:
         if "frame=" not in message or "time=" not in message:
             return None
 
-        match = self._PROGRESS_PATTERN.search(message)
-        if not match:
+        fields = {match.group("key"): match.group("value") for match in self._PROGRESS_FIELDS.finditer(message)}
+        if "frame" not in fields or "time" not in fields:
             return None
 
-        result = {k: v for k, v in match.groupdict().items() if v is not None}
+        result = {key: value for key, value in fields.items() if key not in ("Lsize",)}
+        if "Lsize" in fields:
+            result["size"] = fields["Lsize"]
         result["stage"] = "converting"
-        if self.duration and self.duration > 0:
-            seconds = self._time_seconds(result.get("time", "00:00:00"))
+        seconds = self._time_seconds(result.get("time"))
+        if seconds is None:
+            return None
+        if seconds is not None and self.duration and self.duration > 0:
             result["percent"] = str(min(100.0, max(0.0, seconds * 100.0 / self.duration)))
             try:
                 rate = float(result.get("speed", "").rstrip("x"))
@@ -47,4 +45,4 @@ class FFMpegOutputParser:
             h, m, s = value.split(":")
             return int(h) * 3600 + int(m) * 60 + float(s)
         except (ValueError, AttributeError):
-            return 0.0
+            return None

@@ -35,6 +35,7 @@ def kill_processes_for_task(task_id):
 class GlobalBridgeFFmpegPopen(_original_popen):
     def __init__(self, args, *remaining, **kwargs):
         self._stderr_thread = None
+        self._stderr_capture = []
         self.task_id = getattr(_thread_local, "task_id", None)
         self.last_emit_time = 0.0
         self.parser = FFMpegOutputParser()
@@ -72,13 +73,17 @@ class GlobalBridgeFFmpegPopen(_original_popen):
         buffer = bytearray()
         while True:
             try:
-                chunk = self.stderr.read(4096)
+                chunk = os.read(self.stderr.fileno(), 4096)
             except Exception:
                 break
             if not chunk:
                 if buffer:
-                    self._handle_stderr_fragment(buffer.decode("utf-8", errors="replace"))
+                    fragment = buffer.decode("utf-8", errors="replace")
+                    self._stderr_capture.append(fragment)
+                    self._handle_stderr_fragment(fragment)
                 break
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8", errors="replace")
             buffer.extend(chunk)
             while b"\r" in buffer or b"\n" in buffer:
                 idx_r = buffer.find(b"\r")
@@ -93,7 +98,33 @@ class GlobalBridgeFFmpegPopen(_original_popen):
                 line = buffer[:split_idx]
                 del buffer[:split_idx + 1]
                 if line:
-                    self._handle_stderr_fragment(line.decode("utf-8", errors="replace"))
+                    fragment = line.decode("utf-8", errors="replace")
+                    self._stderr_capture.append(fragment + "\n")
+                    self._handle_stderr_fragment(fragment)
+
+    @classmethod
+    def run(cls, *args, timeout=None, input=None, **kwargs):
+        command = args[0] if args else kwargs.get("args")
+        executable = command[0] if isinstance(command, (list, tuple)) and command else command
+        is_ffmpeg = os.path.basename(str(executable or "")).lower() in {
+            "ffmpeg", "ffmpeg.exe", "avconv", "avconv.exe"
+        }
+        if not is_ffmpeg:
+            return _original_popen.run(*args, timeout=timeout, input=input, **kwargs)
+
+        text_mode = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+        if input is not None and kwargs.get("stdin") is None:
+            kwargs["stdin"] = subprocess.PIPE
+        with cls(*args, **kwargs) as proc:
+            if input is not None:
+                proc.stdin.write(input)
+                proc.stdin.close()
+            stdout = proc.stdout.read() if proc.stdout is not None else ("" if text_mode else b"")
+            proc.wait(timeout=timeout)
+            stderr_text = "".join(proc._stderr_capture)
+            stderr = stderr_text if text_mode else stderr_text.encode("utf-8", errors="replace")
+            default = "" if text_mode else b""
+            return stdout or default, stderr or default, proc.returncode
 
     def _handle_stderr_fragment(self, fragment):
         if not self.task_id:

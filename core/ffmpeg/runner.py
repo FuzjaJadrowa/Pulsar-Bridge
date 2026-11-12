@@ -2,6 +2,7 @@ import subprocess
 from collections import deque
 import threading
 import time
+import re
 from core.utils import emit_json
 
 try:
@@ -77,10 +78,16 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
         return 1
 
     stderr_output = deque(maxlen=128)
+    detected_duration = {"seconds": None}
+    duration_pattern = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
     def consume_stderr():
         for line in proc.stderr:
             stderr_output.append(line)
+            match = duration_pattern.search(line)
+            if match:
+                hours, minutes, seconds = match.groups()
+                detected_duration["seconds"] = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
     stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
     stderr_thread.start()
@@ -89,6 +96,8 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
         data = _parse_progress_line(line)
         if not data:
             continue
+        if detected_duration["seconds"] is not None:
+            data["duration_seconds"] = detected_duration["seconds"]
         progress_callback(data)
         if data.get("progress") == "end":
             break
