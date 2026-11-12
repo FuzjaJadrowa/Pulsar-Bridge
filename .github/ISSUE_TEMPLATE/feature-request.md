@@ -1,4 +1,4 @@
-﻿---
+---
 name: Feature Request
 about: Suggest an improvement to Pulsar Bridge.
 title: ''
