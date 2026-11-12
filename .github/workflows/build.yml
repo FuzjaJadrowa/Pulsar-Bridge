@@ -63,6 +63,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/b')
+    permissions:
+      contents: write
+      issues: write
 
     steps:
       - name: Checkout code
@@ -98,3 +101,35 @@ jobs:
             artifacts/pulsar-bridge-linux
             artifacts/pulsar-bridge-macos
             artifacts/pulsar-bridge-windows.exe
+
+      - name: Close ready issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releaseTag = context.ref.replace('refs/tags/', '');
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'status: ready',
+              per_page: 100,
+            });
+
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Closed automatically after publishing ${releaseTag}.`,
+              });
+
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }

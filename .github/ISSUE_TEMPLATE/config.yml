@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Report an issue in Pulsar
+  - name: Report an issue with Pulsar
     url: https://github.com/FuzjaJadrowa/Pulsar/issues
     about: Use this only for problems in the Pulsar desktop app. Report Bridge issues here in this repository.
