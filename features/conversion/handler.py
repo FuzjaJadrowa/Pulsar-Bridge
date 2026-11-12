@@ -10,6 +10,7 @@ import tarfile
 import gzip
 import bz2
 import lzma
+import stat
 
 try:
     from hachoir.parser import createParser
@@ -49,8 +50,8 @@ try:
 except Exception:
     brotli = None
 
-from System.ffmpeg_runner import run_ffmpeg_with_progress
-from System.utils import emit_json, ProgressEmitter, parse_time_to_seconds, resolve_progress_percent, is_safe_path
+from core.ffmpeg.runner import run_ffmpeg_with_progress
+from core.utils import emit_json, ProgressEmitter, parse_time_to_seconds, resolve_progress_percent, is_safe_path
 
 _emit = emit_json
 _ProgressEmitter = ProgressEmitter
@@ -95,7 +96,7 @@ def _extract_duration(path):
     except Exception:
         return None
 
-from System.extensions import (
+from core.media.extensions import (
     VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, IMAGE_EXTENSIONS,
     ARCHIVE_EXTENSIONS, FONT_EXTENSIONS, MULTI_EXTENSIONS,
     _probe_file_content, _detect_extension, _detect_category
@@ -365,15 +366,27 @@ class ConvertHandler:
         percent = base + (span * (current / total))
         progress.emit(percent)
 
+    @staticmethod
+    def _validate_archive_entries(entries, size_getter):
+        if len(entries) > 100_000:
+            raise Exception("Archive contains too many entries (limit: 100000).")
+        total = sum(max(0, int(size_getter(entry) or 0)) for entry in entries)
+        if total > 100 * 1024 * 1024 * 1024:
+            raise Exception("Archive expands beyond the 100 GiB safety limit.")
+        return total or len(entries)
+
     def _extract_zip(self, input_path, work_dir, progress):
         with zipfile.ZipFile(input_path) as zf:
             infos = zf.infolist()
-            total = sum(info.file_size for info in infos) or len(infos)
+            total = self._validate_archive_entries(infos, lambda info: info.file_size)
             done = 0
             for info in infos:
                 target_path = os.path.join(work_dir, info.filename)
                 if not is_safe_path(work_dir, target_path):
-                    continue
+                    raise Exception(f"Unsafe path in archive: {info.filename}")
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise Exception(f"Symbolic links are not supported in archives: {info.filename}")
                 zf.extract(info, work_dir)
                 done += info.file_size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
@@ -381,12 +394,14 @@ class ConvertHandler:
     def _extract_tar(self, input_path, work_dir, mode, progress):
         with tarfile.open(input_path, mode) as tf:
             members = tf.getmembers()
-            total = sum(m.size for m in members) or len(members)
+            total = self._validate_archive_entries(members, lambda member: member.size)
             done = 0
             for member in members:
                 target_path = os.path.join(work_dir, member.name)
                 if not is_safe_path(work_dir, target_path):
-                    continue
+                    raise Exception(f"Unsafe path in archive: {member.name}")
+                if not (member.isfile() or member.isdir()):
+                    raise Exception(f"Links and special files are not supported in archives: {member.name}")
                 tf.extract(member, work_dir)
                 done += member.size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
@@ -396,26 +411,28 @@ class ConvertHandler:
             raise Exception("py7zr is not available.")
         with py7zr.SevenZipFile(input_path, mode="r") as zf:
             items = zf.list()
+            total = self._validate_archive_entries(items, lambda item: item.uncompressed)
             for item in items:
                 target_path = os.path.join(work_dir, item.filename)
                 if not is_safe_path(work_dir, target_path):
                     raise Exception(f"Unsafe path in archive: {item.filename}")
-            total = sum(item.uncompressed for item in items if item.uncompressed) or len(items)
             zf.extractall(work_dir)
-            done = total if total else len(items)
-            self._emit_step_progress(progress, 15, 40, done, total if total else len(items))
+            self._emit_step_progress(progress, 15, 40, total, total)
 
     def _extract_rar(self, input_path, work_dir, progress):
         if not rarfile:
             raise Exception("rarfile is not available.")
         with rarfile.RarFile(input_path) as rf:
             infos = rf.infolist()
-            total = sum(info.file_size for info in infos) or len(infos)
+            total = self._validate_archive_entries(infos, lambda info: info.file_size)
             done = 0
             for info in infos:
                 target_path = os.path.join(work_dir, info.filename)
                 if not is_safe_path(work_dir, target_path):
-                    continue
+                    raise Exception(f"Unsafe path in archive: {info.filename}")
+                is_symlink = getattr(info, "is_symlink", None)
+                if callable(is_symlink) and is_symlink():
+                    raise Exception(f"Symbolic links are not supported in archives: {info.filename}")
                 rf.extract(info, work_dir)
                 done += info.file_size or 1
                 self._emit_step_progress(progress, 15, 40, done, total)
@@ -435,8 +452,10 @@ class ConvertHandler:
                 chunk = src.read(1024 * 1024)
                 if not chunk:
                     break
-                dst.write(chunk)
                 done += len(chunk)
+                if done > 100 * 1024 * 1024 * 1024:
+                    raise Exception("Archive expands beyond the 100 GiB safety limit.")
+                dst.write(chunk)
                 self._emit_step_progress(progress, 15, 40, done, total)
 
     def _pack_zip(self, work_dir, output_path, progress):

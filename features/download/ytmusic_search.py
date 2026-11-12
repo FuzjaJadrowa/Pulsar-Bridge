@@ -1,7 +1,7 @@
 import json
 import os
 import gettext
-from System.utils import emit_json
+from core.utils import emit_json
 
 class YTMusicSearchHandler:
     def __init__(self, task_id):

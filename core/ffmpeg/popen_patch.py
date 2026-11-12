@@ -7,9 +7,9 @@ import weakref
 from contextlib import contextmanager
 
 import yt_dlp.downloader.external as yt_external
-from System.ffmpeg_output_parser import FFMpegOutputParser
-from System.ffmpeg_runner import kill_ffmpeg_for_task
-from System.utils import emit_json
+from core.ffmpeg.output_parser import FFMpegOutputParser
+from core.ffmpeg.runner import kill_ffmpeg_for_task
+from core.utils import emit_json
 
 _active_popens = {}
 _popens_lock = threading.Lock()

@@ -119,6 +119,9 @@ def resolve_progress_percent(payload, total_seconds):
     return percent, None
 
 def is_safe_path(base_dir, target_path):
-    abs_base = os.path.abspath(base_dir)
-    abs_target = os.path.abspath(target_path)
-    return os.path.commonpath([abs_base]) == os.path.commonpath([abs_base, abs_target])
+    try:
+        abs_base = os.path.realpath(base_dir)
+        abs_target = os.path.realpath(target_path)
+        return os.path.commonpath([abs_base, abs_target]) == abs_base
+    except (OSError, ValueError):
+        return False

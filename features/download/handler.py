@@ -1,10 +1,10 @@
 import yt_dlp
 import json
-from Download.ytmusic_search import YTMusicSearchHandler
-from System.ffmpeg_popen_patch import patch_ffmpeg_popen_for_progress
-from Download.extractors import create_resolver_ydl, metadata_fallback
-from main import BridgeLogger
-from System.utils import emit_json
+from features.download.ytmusic_search import YTMusicSearchHandler
+from core.ffmpeg.popen_patch import patch_ffmpeg_popen_for_progress
+from features.download.extractors import create_resolver_ydl, metadata_fallback
+from core.logging import BridgeLogger
+from core.utils import emit_json
 
 class DownloadHandler:
     def __init__(self, task_id):

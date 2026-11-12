@@ -1,10 +1,10 @@
 import yt_dlp
 
-from Download.apple_music_resolver import AppleMusicIE
-from Download.deezer_resolver import DeezerIE
-from Download.music_extractor import PulsarMusicSearchIE
-from Download.spotify_resolver import SpotifyIE
-from Download.vider_resolver import ViderIE
+from features.download.resolvers.apple_music import AppleMusicIE
+from features.download.resolvers.deezer import DeezerIE
+from features.download.music_extractor import PulsarMusicSearchIE
+from features.download.resolvers.spotify import SpotifyIE
+from features.download.resolvers.vider import ViderIE
 
 BRIDGE_EXTRACTORS = (SpotifyIE, AppleMusicIE, DeezerIE, ViderIE, PulsarMusicSearchIE)
 
