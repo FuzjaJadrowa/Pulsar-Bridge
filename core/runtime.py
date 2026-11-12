@@ -169,6 +169,7 @@ class RateLimitedStdout:
         return True
 
 rate_limited_stdout = None
+PROTOCOL_VERSION = 1
 
 def run_task_with_cleanup(task_id, target_fn, *args, **kwargs):
     try:
@@ -194,7 +195,7 @@ def main():
     from features.conversion.handler import ConvertMetadataHandler, ConvertHandler
     from features.compression.handler import CompressHandler
 
-    emit_json({"type": "ready", "message": "Bridge is ready"})
+    emit_json({"type": "ready", "protocol_version": PROTOCOL_VERSION})
 
     try:
         for line in sys.stdin:

@@ -12,9 +12,9 @@ class BridgeLogger:
         ffmpeg_data = self.ffmpeg_parser.parse_progress_line(msg)
         if ffmpeg_data:
             payload = {
-                "type": "progress_ffmpeg",
+                "type": "progress",
                 "id": self.task_id,
-                "status": "processing"
+                "stage": "converting"
             }
             payload.update(ffmpeg_data)
             emit_json(payload)

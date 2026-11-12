@@ -141,9 +141,9 @@ class GlobalBridgeFFmpegPopen(_original_popen):
         if ffmpeg_data:
             self.last_emit_time = now
             payload = {
-                "type": "progress_ffmpeg",
+                "type": "progress",
                 "id": self.task_id,
-                "status": "processing",
+                "stage": "converting",
             }
             with _task_transcodes_lock:
                 has_transcode = self.task_id in _task_transcodes

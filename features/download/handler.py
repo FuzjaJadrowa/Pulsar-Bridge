@@ -60,13 +60,11 @@ class DownloadHandler:
                 "type": "progress",
                 "id": self.task_id,
                 "percent": round(percent * (0.70 if getattr(self, 'has_transcode', False) else 1.0), 2),
-                "eta": eta,
                 "eta_seconds": eta,
                 "speed": d.get('speed', 0) or 0,
                 "filename": d.get('filename', ''),
                 "item_index": item_index,
                 "item_count": item_count,
-                "status": "downloading",
                 "stage": "downloading"
             }
             emit_json(msg)
