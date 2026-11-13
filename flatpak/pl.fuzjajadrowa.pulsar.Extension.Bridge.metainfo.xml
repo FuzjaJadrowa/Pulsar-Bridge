@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="addon">
+  <id>pl.fuzjajadrowa.pulsar.Extension.Bridge</id>
+  <extends>pl.fuzjajadrowa.pulsar</extends>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Pulsar Bridge</name>
+  <summary>Python helper which guarantees the correct functioning of the Pulsar application.</summary>
+  <developer id="pl.fuzjajadrowa">
+    <name>Fuzja Jądrowa</name>
+  </developer>
+  <url type="vcs-browser">https://github.com/FuzjaJadrowa/Pulsar-Bridge</url>
+</component>

@@ -1,5 +1,5 @@
 # Pulsar-Bridge
-Simple yt-dlp bridge which guarantees the correct functioning of the [Pulsar](https://github.com/FuzjaJadrowa/Pulsar) application.
+Python helper which guarantees the correct functioning of the [Pulsar](https://github.com/FuzjaJadrowa/Pulsar) application.
 ## Features
 * Utilizes the direct Python API of `yt-dlp`, ensuring faster execution and superior error handling compared to traditional CLI wrapper.
 * Communicates with the main application via structured JSON objects sent over `stdin`/`stdout`.
