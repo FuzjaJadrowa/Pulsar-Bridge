@@ -1,6 +1,9 @@
 .idea
 .venv
+.venv-wsl
 *.spec
 build
 dist
 __pycache__/
+flatpak-pip-generator.py
+command.txt
