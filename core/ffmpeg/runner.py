@@ -5,11 +5,6 @@ import time
 import re
 from core.utils import emit_json
 
-try:
-    from better_ffmpeg_progress import FFMpegProgress as _FFMpegProgress
-except Exception:
-    _FFMpegProgress = None
-
 _active_ffmpeg = {}
 _ffmpeg_lock = threading.Lock()
 
@@ -111,29 +106,4 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
 
 def run_ffmpeg_with_progress(task_id, ffmpeg_path, args, progress_callback):
     cmd = [ffmpeg_path] + args + ["-progress", "pipe:1", "-nostats"]
-
-    if _FFMpegProgress and hasattr(_FFMpegProgress, "run_command_with_progress"):
-        registered = False
-        try:
-            runner = _FFMpegProgress(cmd)
-            for payload in runner.run_command_with_progress():
-                proc = getattr(runner, "process", None)
-                if proc is not None and not registered:
-                    registered = register_ffmpeg(task_id, proc)
-                if proc is None and not registered:
-                    raise RuntimeError("FFmpeg process not attached.")
-                progress_callback(payload)
-            proc = getattr(runner, "process", None)
-            if proc is not None and not registered:
-                registered = register_ffmpeg(task_id, proc)
-            if proc is None and not registered:
-                raise RuntimeError("FFmpeg process not attached.")
-            ret = proc.returncode if proc is not None else 0
-            return FFmpegResult(ret)
-        except Exception:
-            pass
-        finally:
-            if registered:
-                kill_ffmpeg_for_task(task_id)
-
     return _run_ffmpeg_manual(task_id, cmd, progress_callback)
