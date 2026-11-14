@@ -7,7 +7,8 @@
   <name>Pulsar Bridge</name>
   <summary>Python helper which guarantees the correct functioning of the Pulsar application.</summary>
   <developer id="pl.fuzjajadrowa">
-    <name>Fuzja Jądrowa</name>
+    <name>Fuzja Jadrowa</name>
   </developer>
+  <url type="homepage">https://github.com/FuzjaJadrowa/Pulsar-Bridge</url>
   <url type="vcs-browser">https://github.com/FuzjaJadrowa/Pulsar-Bridge</url>
 </component>
