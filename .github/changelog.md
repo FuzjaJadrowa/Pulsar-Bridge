@@ -1,5 +1,3 @@
-# Build 32
-- Added custom parser instead of `better-ffmpeg-progress`.
-- Refactored whole project.
-- Added protocol version handling.
-- Changed syntax of the bridge output.
+# Build 33
+- Fixed progress and ETA output for processes using yt-dlp and ffmpeg.
+- Added `-progress` flags grouping before executing a fallback.

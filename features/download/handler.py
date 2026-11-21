@@ -7,7 +7,7 @@ from features.download.ytmusic_search import YTMusicSearchHandler
 from core.ffmpeg.popen_patch import patch_ffmpeg_popen_for_progress
 from features.download.extractors import create_resolver_ydl, metadata_fallback
 from core.logging import BridgeLogger
-from core.utils import emit_json
+from core.utils import emit_json, resolve_progress_percent
 
 class DownloadHandler:
     def __init__(self, task_id):
@@ -246,33 +246,9 @@ class DownloadHandler:
 
                 duration = float(info.get('duration') or max((float(fmt.get('duration') or 0) for fmt in inputs), default=0))
                 def on_progress(data):
-                    percent, eta = None, None
-                    progress_duration = duration or float(data.get('duration_seconds') or 0)
-                    elapsed = data.get('out_time') or data.get('time')
-                    if elapsed is None:
-                        elapsed_ms = data.get('out_time_us', data.get('out_time_ms'))
-                        try:
-                            seconds = float(elapsed_ms) / 1_000_000.0
-                            elapsed = seconds
-                        except (ValueError, TypeError):
-                            elapsed = None
-                    try:
-                        if isinstance(elapsed, (int, float)):
-                            seconds = float(elapsed)
-                        elif elapsed:
-                            h, m, s = str(elapsed).split(':')
-                            seconds = int(h) * 3600 + int(m) * 60 + float(s)
-                        else:
-                            seconds = None
-                    except (ValueError, TypeError):
-                        seconds = None
-                    if progress_duration > 0 and seconds is not None:
-                        percent = min(100.0, max(0.0, seconds * 100.0 / progress_duration))
-                        try:
-                            speed = float(str(data.get('speed', '0x')).rstrip('x'))
-                            eta = max(0.0, (progress_duration - seconds) / speed) if speed > 0 else None
-                        except (ValueError, TypeError):
-                            pass
+                    percent, eta = resolve_progress_percent(data, duration)
+                    if percent is None and eta is None:
+                        return
                     payload = {'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting'}
                     if percent is not None:
                         payload['percent'] = percent

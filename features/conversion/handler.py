@@ -269,70 +269,6 @@ class ConvertHandler:
         return kwargs
 
     @staticmethod
-    def _parse_time_to_seconds(value):
-        if value is None:
-            return None
-        raw = str(value).strip()
-        if not raw:
-            return None
-        if raw.isdigit():
-            return float(raw)
-        parts = raw.split(":")
-        if not parts:
-            return None
-        try:
-            parts = [float(p) for p in parts]
-        except Exception:
-            return None
-        total = 0.0
-        for idx, part in enumerate(reversed(parts)):
-            total += part * (60 ** idx)
-        return total
-
-    def _resolve_progress_percent(self, payload, total_seconds):
-        if payload is None:
-            return None, None
-        if isinstance(payload, (int, float)):
-            return float(payload), None
-        if not isinstance(payload, dict):
-            return None, None
-        percent = None
-        elapsed = None
-        if "out_time_ms" in payload:
-            try:
-                elapsed = float(payload["out_time_ms"]) / 1000.0
-            except Exception:
-                elapsed = None
-        if elapsed is None and "out_time_us" in payload:
-            try:
-                elapsed = float(payload["out_time_us"]) / 1_000_000.0
-            except Exception:
-                elapsed = None
-        if elapsed is None and "out_time" in payload:
-            elapsed = self._parse_time_to_seconds(payload.get("out_time"))
-        if elapsed is None and "time" in payload:
-            elapsed = self._parse_time_to_seconds(payload.get("time"))
-
-        for key in ("percent", "percentage"):
-            if key in payload:
-                try:
-                    percent = float(payload[key])
-                except Exception:
-                    percent = None
-                break
-        if percent is None and "progress" in payload and isinstance(payload["progress"], (int, float)):
-            percent = float(payload["progress"])
-        if percent is not None and percent <= 1.0 and (payload.get("percent_is_ratio") or payload.get("progress_is_ratio")):
-            percent *= 100.0
-        if total_seconds and total_seconds > 0:
-            if elapsed is not None:
-                if percent is None:
-                    percent = (elapsed / total_seconds) * 100.0
-                eta_seconds = max(0.0, total_seconds - elapsed)
-                return percent, eta_seconds
-        return percent, None
-
-    @staticmethod
     def _detect_archive_format(path):
         ext, forced = _detect_extension(path)
         if forced == "archive":
@@ -723,7 +659,7 @@ class ConvertHandler:
 
                 progress.emit(0, force=True)
                 def on_progress(data):
-                    percent, eta_seconds = self._resolve_progress_percent(data, total_seconds)
+                    percent, eta_seconds = resolve_progress_percent(data, total_seconds)
                     if percent is not None:
                         progress.emit(percent, eta_seconds=eta_seconds)
 

@@ -5,7 +5,7 @@ import tempfile
 import glob
 
 from core.ffmpeg.runner import run_ffmpeg_with_progress
-from core.utils import emit_json, ProgressEmitter, resolve_progress_percent
+from core.utils import emit_json, ProgressEmitter, parse_ffmpeg_speed, resolve_progress_percent
 
 _emit = emit_json
 _ProgressEmitter = ProgressEmitter
@@ -122,7 +122,13 @@ class CompressHandler:
                     def on_first_pass(data):
                         percent, eta_seconds = _resolve_progress_percent(data, total_seconds)
                         if percent is not None:
-                            progress.emit(percent * 0.5, eta_seconds=eta_seconds)
+                            scaled_eta = None
+                            if eta_seconds is not None:
+                                effective_total = total_seconds or data.get("duration_seconds")
+                                speed = parse_ffmpeg_speed(data.get("speed"))
+                                if effective_total and effective_total > 0 and speed:
+                                    scaled_eta = eta_seconds + (float(effective_total) / speed)
+                            progress.emit(percent * 0.5, eta_seconds=scaled_eta)
 
                     ret = run_ffmpeg_with_progress(
                         self.task_id, ffmpeg_path, first_args, on_first_pass

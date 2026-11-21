@@ -75,6 +75,31 @@ def parse_time_to_seconds(value):
         total += part * (60 ** idx)
     return total
 
+def parse_ffmpeg_speed(value):
+    if value is None:
+        return None
+    raw = str(value).strip().rstrip("xX").strip()
+    if not raw or raw.upper() == "N/A":
+        return None
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+def _parse_non_negative_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw.upper() == "N/A":
+            return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
 def resolve_progress_percent(payload, total_seconds):
     if payload is None:
         return None, None
@@ -82,22 +107,31 @@ def resolve_progress_percent(payload, total_seconds):
         return float(payload), None
     if not isinstance(payload, dict):
         return None, None
+
+    if payload.get("progress") == "end":
+        return 100.0, 0.0
+
     percent = None
     elapsed = None
-    if "out_time_ms" in payload:
-        try:
-            elapsed = float(payload["out_time_ms"]) / 1000.0
-        except Exception:
-            elapsed = None
-    if elapsed is None and "out_time_us" in payload:
-        try:
-            elapsed = float(payload["out_time_us"]) / 1_000_000.0
-        except Exception:
-            elapsed = None
+
+    # Prefer out_time_us / out_time / time before out_time_ms.
+    # FFmpeg reports `out_time_ms` in microseconds despite its field name.
+    if "out_time_us" in payload:
+        us = _parse_non_negative_float(payload.get("out_time_us"))
+        if us is not None:
+            elapsed = us / 1_000_000.0
     if elapsed is None and "out_time" in payload:
-        elapsed = parse_time_to_seconds(payload.get("out_time"))
+        parsed = parse_time_to_seconds(payload.get("out_time"))
+        if parsed is not None and parsed >= 0:
+            elapsed = parsed
     if elapsed is None and "time" in payload:
-        elapsed = parse_time_to_seconds(payload.get("time"))
+        parsed = parse_time_to_seconds(payload.get("time"))
+        if parsed is not None and parsed >= 0:
+            elapsed = parsed
+    if elapsed is None and "out_time_ms" in payload:
+        ms_in_us = _parse_non_negative_float(payload.get("out_time_ms"))
+        if ms_in_us is not None:
+            elapsed = ms_in_us / 1_000_000.0
 
     for key in ("percent", "percentage"):
         if key in payload:
@@ -110,12 +144,18 @@ def resolve_progress_percent(payload, total_seconds):
         percent = float(payload["progress"])
     if percent is not None and percent <= 1.0 and (payload.get("percent_is_ratio") or payload.get("progress_is_ratio")):
         percent *= 100.0
-    if total_seconds and total_seconds > 0:
-        if elapsed is not None:
-            if percent is None:
-                percent = (elapsed / total_seconds) * 100.0
-            eta_seconds = max(0.0, total_seconds - elapsed)
-            return percent, eta_seconds
+
+    effective_total = _parse_non_negative_float(total_seconds)
+    if not effective_total or effective_total <= 0:
+        effective_total = _parse_non_negative_float(payload.get("duration_seconds"))
+
+    if effective_total and effective_total > 0 and elapsed is not None:
+        if percent is None:
+            percent = max(0.0, min(100.0, (elapsed / effective_total) * 100.0))
+        remaining = max(0.0, effective_total - elapsed)
+        speed = parse_ffmpeg_speed(payload.get("speed"))
+        eta_seconds = (remaining / speed) if speed else None
+        return percent, eta_seconds
     return percent, None
 
 def is_safe_path(base_dir, target_path):

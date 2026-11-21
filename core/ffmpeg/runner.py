@@ -87,15 +87,24 @@ def _run_ffmpeg_manual(task_id, cmd, progress_callback, timeout=None):
     stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
     stderr_thread.start()
 
+    block = {}
     for line in proc.stdout:
         data = _parse_progress_line(line)
         if not data:
             continue
+        block.update(data)
+        progress_state = data.get("progress")
+        if progress_state in ("continue", "end"):
+            if detected_duration["seconds"] is not None:
+                block["duration_seconds"] = detected_duration["seconds"]
+            progress_callback(dict(block))
+            block.clear()
+            if progress_state == "end":
+                break
+    if block:
         if detected_duration["seconds"] is not None:
-            data["duration_seconds"] = detected_duration["seconds"]
-        progress_callback(data)
-        if data.get("progress") == "end":
-            break
+            block["duration_seconds"] = detected_duration["seconds"]
+        progress_callback(dict(block))
 
     try:
         returncode = proc.wait(timeout=timeout)
