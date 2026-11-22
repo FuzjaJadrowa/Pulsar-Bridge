@@ -1,16 +1,7 @@
 import os
 import json
-import time
-import io
-import base64
 import shutil
 import tempfile
-import zipfile
-import tarfile
-import gzip
-import bz2
-import lzma
-import stat
 
 try:
     from hachoir.parser import createParser
@@ -53,7 +44,15 @@ except Exception:
     brotli = None
 
 from core.ffmpeg.runner import run_ffmpeg_with_progress
-from core.utils import emit_json, ProgressEmitter, parse_time_to_seconds, resolve_progress_percent, is_safe_path
+from core.media.probe import probe_media
+from core.tasking import TaskCancelledError, run_in_worker_process
+from core.utils import emit_json, ProgressEmitter, resolve_progress_percent
+from core.worker import (
+    worker_convert_archive,
+    worker_convert_font,
+    worker_convert_image,
+    worker_convert_svg,
+)
 
 _emit = emit_json
 _ProgressEmitter = ProgressEmitter
@@ -75,6 +74,7 @@ def _format_duration(seconds):
         return f"{hrs:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
 
+
 def _extract_duration(path):
     if not createParser or not extractMetadata:
         return None
@@ -91,61 +91,100 @@ def _extract_duration(path):
                 pass
         if not metadata:
             return None
-        duration = metadata.get('duration')
+        duration = metadata.get("duration")
         if not duration:
             return None
         return duration.total_seconds()
     except Exception:
         return None
 
+
 from core.media.extensions import (
-    VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, IMAGE_EXTENSIONS,
-    ARCHIVE_EXTENSIONS, FONT_EXTENSIONS, MULTI_EXTENSIONS,
-    _probe_file_content, _detect_extension, _detect_category
+    VIDEO_EXTENSIONS,
+    AUDIO_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    ARCHIVE_EXTENSIONS,
+    FONT_EXTENSIONS,
+    _detect_extension,
+    _detect_category,
 )
 
-def _extract_image_size(path):
+
+def _extract_image_info(path):
     if not Image:
-        return None, None
+        return None, None, False, 1
     try:
         with Image.open(path) as img:
-            return img.size[0], img.size[1]
+            width, height = img.size[0], img.size[1]
+            frame_count = int(getattr(img, "n_frames", 1) or 1)
+            is_animated = bool(getattr(img, "is_animated", False)) or frame_count > 1
+            return width, height, is_animated, frame_count
     except Exception:
-        return None, None
+        return None, None, False, 1
+
+
+def _parse_metadata_args(args):
+    ffprobe_path = None
+    file_path = None
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--ffprobe-location" and idx + 1 < len(args):
+            ffprobe_path = args[idx + 1]
+            idx += 2
+            continue
+        file_path = arg
+        idx += 1
+    return file_path, ffprobe_path
+
 
 class ConvertMetadataHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            _emit(payload)
 
     def run(self, args):
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
             if not args:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "No file path provided"
+                    "code": "MISSING_PATH",
+                    "error": "No file path provided",
                 })
                 return
 
-            path = args[-1]
-            if not os.path.isfile(path):
-                _emit({
+            path, ffprobe_path = _parse_metadata_args(args)
+            if not path or not os.path.isfile(path):
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "File not found"
+                    "code": "FILE_NOT_FOUND",
+                    "error": "File not found",
                 })
                 return
 
             ext, forced_category = _detect_extension(path)
             category = forced_category or _detect_category(ext)
             if not category:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Unsupported format"
+                    "code": "UNSUPPORTED_FORMAT",
+                    "error": "Unsupported format",
                 })
                 return
 
@@ -153,13 +192,26 @@ class ConvertMetadataHandler:
 
             duration_seconds = None
             duration_string = None
+            probed_media = None
             if category in ("video", "audio"):
-                duration_seconds = _extract_duration(path)
+                probed_media = probe_media(path, ffprobe_path=ffprobe_path)
+                if self.cancel_token is not None:
+                    self.cancel_token.check()
+                if probed_media and probed_media.get("duration_seconds") is not None:
+                    duration_seconds = probed_media["duration_seconds"]
+                else:
+                    duration_seconds = _extract_duration(path)
                 duration_string = _format_duration(duration_seconds)
+
             width = None
             height = None
+            is_animated = False
+            frame_count = 1
             if category == "image":
-                width, height = _extract_image_size(path)
+                width, height, is_animated, frame_count = _extract_image_info(path)
+
+            if self.cancel_token is not None:
+                self.cancel_token.check()
 
             base_name = os.path.basename(path)
             if ext:
@@ -167,49 +219,78 @@ class ConvertMetadataHandler:
                 if base_name.lower().endswith(ext_suffix):
                     base_name = base_name[: -len(ext_suffix)]
 
-            payload = {
-                "type": "metadata",
-                "id": self.task_id,
-                "success": True,
-                "data": {
-                    "path": path,
-                    "name": base_name,
-                    "extension": ext or "",
-                    "category": category,
-                    "size_bytes": size_bytes
-                }
+            data = {
+                "path": path,
+                "name": base_name,
+                "extension": ext or "",
+                "category": category,
+                "size_bytes": size_bytes,
             }
 
             if duration_seconds is not None:
-                payload["data"]["duration_seconds"] = duration_seconds
+                data["duration_seconds"] = duration_seconds
             if duration_string:
-                payload["data"]["duration_string"] = duration_string
+                data["duration_string"] = duration_string
             if width is not None:
-                payload["data"]["width"] = width
+                data["width"] = width
             if height is not None:
-                payload["data"]["height"] = height
+                data["height"] = height
+            if category == "image":
+                data["is_animated"] = is_animated
+                data["frame_count"] = frame_count
 
-            _emit(payload)
+            if probed_media is not None:
+                streams = probed_media.get("streams") or []
+                data["format_name"] = probed_media.get("format_name") or ""
+                data["streams"] = streams
+                video_streams = [
+                    s for s in streams
+                    if s.get("codec_type") == "video" and not s.get("is_attached_pic")
+                ]
+                audio_streams = [
+                    s for s in streams
+                    if s.get("codec_type") == "audio"
+                ]
+                if video_streams:
+                    if video_streams[0].get("codec_name"):
+                        data["video_codec"] = video_streams[0]["codec_name"]
+                    if data.get("width") is None and video_streams[0].get("width"):
+                        data["width"] = video_streams[0]["width"]
+                    if data.get("height") is None and video_streams[0].get("height"):
+                        data["height"] = video_streams[0]["height"]
+                if audio_streams and audio_streams[0].get("codec_name"):
+                    data["audio_codec"] = audio_streams[0]["codec_name"]
+
+            self._emit_terminal({
+                "type": "metadata",
+                "id": self.task_id,
+                "success": True,
+                "data": data,
+            })
+        except TaskCancelledError:
+            if self.task_context is not None:
+                raise
+            self._emit_terminal({"type": "cancelled", "id": self.task_id})
         except Exception as e:
-            _emit({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": str(e),
             })
 
 
 class ConvertHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
 
-    @staticmethod
-    def _parse_int(value):
-        try:
-            parsed = int(value)
-        except Exception:
-            return None
-        return parsed if parsed > 0 else None
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            _emit(payload)
 
     @staticmethod
     def _normalize_format(value):
@@ -231,289 +312,16 @@ class ConvertHandler:
         return ""
 
     @staticmethod
-    def _resolve_target_size(original, width, height):
-        orig_w, orig_h = original
-        if width and height:
-            return width, height
-        if width and orig_w > 0:
-            scaled_h = max(1, round(orig_h * (width / orig_w)))
-            return width, scaled_h
-        if height and orig_h > 0:
-            scaled_w = max(1, round(orig_w * (height / orig_h)))
-            return scaled_w, height
-        return orig_w, orig_h
-
-    @staticmethod
-    def _ensure_rgb(img):
-        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-            alpha = img.convert("RGBA")
-            bg = Image.new("RGB", alpha.size, (255, 255, 255))
-            bg.paste(alpha, mask=alpha.split()[-1])
-            return bg
-        if img.mode != "RGB":
-            return img.convert("RGB")
-        return img
-
-    @staticmethod
-    def _build_save_kwargs(fmt, quality, size):
-        kwargs = {}
-        quality_val = ConvertHandler._parse_int(quality)
-        if fmt in ("JPEG", "WEBP", "AVIF", "HEIF", "HEIC") and quality_val:
-            kwargs["quality"] = max(1, min(100, quality_val))
-        if fmt == "PNG" and quality_val:
-            compress_level = int(round((100 - max(1, min(100, quality_val))) * 9 / 100))
-            kwargs["compress_level"] = max(0, min(9, compress_level))
-            kwargs["optimize"] = True
-        if fmt == "ICO" and size:
-            kwargs["sizes"] = [size]
-        return kwargs
-
-    @staticmethod
     def _detect_archive_format(path):
-        ext, forced = _detect_extension(path)
-        if forced == "archive":
-            return ext
+        ext, _ = _detect_extension(path)
         return ext
-
-    @staticmethod
-    def _archive_requires_single_file(fmt):
-        return fmt in ("gz", "bz2", "xz")
-
-    @staticmethod
-    def _resolve_tar_mode(fmt, for_write=True):
-        write = "w" if for_write else "r"
-        if fmt in ("tar.gz", "tgz"):
-            return f"{write}:gz"
-        if fmt in ("tar.bz2", "tbz2"):
-            return f"{write}:bz2"
-        if fmt in ("tar.xz", "txz"):
-            return f"{write}:xz"
-        if fmt == "tar":
-            return f"{write}:"
-        return None
-
-    @staticmethod
-    def _safe_relpath(path, base):
-        rel = os.path.relpath(path, base)
-        return rel.replace("\\", "/")
-
-    def _emit_step_progress(self, progress, base, span, current, total):
-        if total <= 0:
-            progress.emit(base + span)
-            return
-        percent = base + (span * (current / total))
-        progress.emit(percent)
-
-    @staticmethod
-    def _validate_archive_entries(entries, size_getter):
-        if len(entries) > 100_000:
-            raise Exception("Archive contains too many entries (limit: 100000).")
-        total = sum(max(0, int(size_getter(entry) or 0)) for entry in entries)
-        if total > 100 * 1024 * 1024 * 1024:
-            raise Exception("Archive expands beyond the 100 GiB safety limit.")
-        return total or len(entries)
-
-    def _extract_zip(self, input_path, work_dir, progress):
-        with zipfile.ZipFile(input_path) as zf:
-            infos = zf.infolist()
-            total = self._validate_archive_entries(infos, lambda info: info.file_size)
-            done = 0
-            for info in infos:
-                target_path = os.path.join(work_dir, info.filename)
-                if not is_safe_path(work_dir, target_path):
-                    raise Exception(f"Unsafe path in archive: {info.filename}")
-                mode = (info.external_attr >> 16) & 0xFFFF
-                if stat.S_ISLNK(mode):
-                    raise Exception(f"Symbolic links are not supported in archives: {info.filename}")
-                zf.extract(info, work_dir)
-                done += info.file_size or 1
-                self._emit_step_progress(progress, 15, 40, done, total)
-
-    def _extract_tar(self, input_path, work_dir, mode, progress):
-        with tarfile.open(input_path, mode) as tf:
-            members = tf.getmembers()
-            total = self._validate_archive_entries(members, lambda member: member.size)
-            done = 0
-            for member in members:
-                target_path = os.path.join(work_dir, member.name)
-                if not is_safe_path(work_dir, target_path):
-                    raise Exception(f"Unsafe path in archive: {member.name}")
-                if not (member.isfile() or member.isdir()):
-                    raise Exception(f"Links and special files are not supported in archives: {member.name}")
-                tf.extract(member, work_dir)
-                done += member.size or 1
-                self._emit_step_progress(progress, 15, 40, done, total)
-
-    def _extract_7z(self, input_path, work_dir, progress):
-        if not py7zr:
-            raise Exception("py7zr is not available.")
-        with py7zr.SevenZipFile(input_path, mode="r") as zf:
-            items = zf.list()
-            total = self._validate_archive_entries(items, lambda item: item.uncompressed)
-            for item in items:
-                target_path = os.path.join(work_dir, item.filename)
-                if not is_safe_path(work_dir, target_path):
-                    raise Exception(f"Unsafe path in archive: {item.filename}")
-            zf.extractall(work_dir)
-            self._emit_step_progress(progress, 15, 40, total, total)
-
-    def _extract_rar(self, input_path, work_dir, progress):
-        if not rarfile:
-            raise Exception("rarfile is not available.")
-        with rarfile.RarFile(input_path) as rf:
-            infos = rf.infolist()
-            total = self._validate_archive_entries(infos, lambda info: info.file_size)
-            done = 0
-            for info in infos:
-                target_path = os.path.join(work_dir, info.filename)
-                if not is_safe_path(work_dir, target_path):
-                    raise Exception(f"Unsafe path in archive: {info.filename}")
-                is_symlink = getattr(info, "is_symlink", None)
-                if callable(is_symlink) and is_symlink():
-                    raise Exception(f"Symbolic links are not supported in archives: {info.filename}")
-                rf.extract(info, work_dir)
-                done += info.file_size or 1
-                self._emit_step_progress(progress, 15, 40, done, total)
-
-    def _extract_single(self, input_path, work_dir, fmt, progress):
-        opener = gzip.open if fmt == "gz" else bz2.open if fmt == "bz2" else lzma.open
-        total = os.path.getsize(input_path) or 1
-        name = os.path.basename(input_path)
-        for suffix in (".gz", ".bz2", ".xz"):
-            if name.lower().endswith(suffix):
-                name = name[: -len(suffix)]
-                break
-        output_path = os.path.join(work_dir, name or "payload")
-        done = 0
-        with opener(input_path, "rb") as src, open(output_path, "wb") as dst:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                done += len(chunk)
-                if done > 100 * 1024 * 1024 * 1024:
-                    raise Exception("Archive expands beyond the 100 GiB safety limit.")
-                dst.write(chunk)
-                self._emit_step_progress(progress, 15, 40, done, total)
-
-    def _pack_zip(self, work_dir, output_path, progress):
-        files = []
-        for root, _, names in os.walk(work_dir):
-            for name in names:
-                full = os.path.join(root, name)
-                files.append(full)
-        total = sum(os.path.getsize(p) for p in files) or len(files)
-        done = 0
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for full in files:
-                rel = self._safe_relpath(full, work_dir)
-                zf.write(full, rel)
-                done += os.path.getsize(full) or 1
-                self._emit_step_progress(progress, 60, 35, done, total)
-
-    def _pack_tar(self, work_dir, output_path, mode, progress):
-        files = []
-        for root, _, names in os.walk(work_dir):
-            for name in names:
-                files.append(os.path.join(root, name))
-        total = sum(os.path.getsize(p) for p in files) or len(files)
-        done = 0
-        with tarfile.open(output_path, mode) as tf:
-            for full in files:
-                rel = self._safe_relpath(full, work_dir)
-                tf.add(full, arcname=rel)
-                done += os.path.getsize(full) or 1
-                self._emit_step_progress(progress, 60, 35, done, total)
-
-    def _pack_7z(self, work_dir, output_path, progress):
-        if not py7zr:
-            raise Exception("py7zr is not available.")
-        files = []
-        for root, _, names in os.walk(work_dir):
-            for name in names:
-                files.append(os.path.join(root, name))
-        total = sum(os.path.getsize(p) for p in files) or len(files)
-        with py7zr.SevenZipFile(output_path, "w") as zf:
-            zf.writeall(work_dir, arcname=".")
-        self._emit_step_progress(progress, 60, 35, total, total)
-
-    def _pack_single(self, work_dir, output_path, fmt, progress):
-        files = []
-        for root, _, names in os.walk(work_dir):
-            for name in names:
-                files.append(os.path.join(root, name))
-        if len(files) != 1:
-            raise Exception("Single-file archive requires exactly one file.")
-        input_path = files[0]
-        opener = gzip.open if fmt == "gz" else bz2.open if fmt == "bz2" else lzma.open
-        total = os.path.getsize(input_path) or 1
-        done = 0
-        with open(input_path, "rb") as src, opener(output_path, "wb") as dst:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                done += len(chunk)
-                self._emit_step_progress(progress, 60, 35, done, total)
-
-    def _convert_archive(self, input_path, output_path, output_format, progress):
-        input_format = self._detect_archive_format(input_path) or ""
-        output_format = output_format.lower()
-        temp_dir = tempfile.mkdtemp(prefix="pulsar-archive-")
-        try:
-            if input_format in ("zip",):
-                self._extract_zip(input_path, temp_dir, progress)
-            elif input_format in ("7z",):
-                self._extract_7z(input_path, temp_dir, progress)
-            elif input_format in ("rar",):
-                self._extract_rar(input_path, temp_dir, progress)
-            elif self._resolve_tar_mode(input_format, for_write=False):
-                mode = self._resolve_tar_mode(input_format, for_write=False)
-                self._extract_tar(input_path, temp_dir, mode, progress)
-            elif input_format in ("gz", "bz2", "xz"):
-                self._extract_single(input_path, temp_dir, input_format, progress)
-            else:
-                raise Exception("Unsupported input archive format.")
-
-            if output_format == "zip":
-                self._pack_zip(temp_dir, output_path, progress)
-            elif output_format == "7z":
-                self._pack_7z(temp_dir, output_path, progress)
-            else:
-                tar_mode = self._resolve_tar_mode(output_format, for_write=True)
-                if tar_mode:
-                    self._pack_tar(temp_dir, output_path, tar_mode, progress)
-                elif output_format in ("gz", "bz2", "xz"):
-                    self._pack_single(temp_dir, output_path, output_format, progress)
-                else:
-                    raise Exception("Unsupported output archive format.")
-            progress.emit(100, force=True)
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def _convert_font(self, input_path, output_path, output_format, progress):
-        if not TTFont:
-            raise Exception("fontTools is not available.")
-        fmt = output_format.lower()
-        if fmt not in ("ttf", "otf", "woff", "woff2"):
-            raise Exception("Unsupported output font format.")
-        if fmt == "woff2" and brotli is None:
-            raise Exception("WOFF2 requires brotli.")
-        progress.emit(0, force=True)
-        font = TTFont(input_path, recalcBBoxes=True, recalcTimestamp=False)
-        progress.emit(35)
-        if fmt in ("woff", "woff2"):
-            font.flavor = fmt
-        else:
-            font.flavor = None
-        progress.emit(70)
-        font.save(output_path)
-        progress.emit(100, force=True)
 
     def run(self, args, payload=None):
         progress = _ProgressEmitter(self.task_id)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
             if payload is None:
                 payload = None
                 if args:
@@ -528,45 +336,45 @@ class ConvertHandler:
             output_path = str(payload.get("output_path") or "").strip()
             category = str(payload.get("category") or "").strip().lower()
             if not input_path:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Input path is missing."
+                    "error": "Input path is missing.",
                 })
                 return
             if category and category not in ("image", "archive", "font", "video", "audio"):
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Unsupported conversion category."
+                    "error": "Unsupported conversion category.",
                 })
                 return
             if not output_path:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Output path is missing."
+                    "error": "Output path is missing.",
                 })
                 return
             if not os.path.isfile(input_path):
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "File not found."
+                    "error": "File not found.",
                 })
                 return
 
             output_format = self._resolve_output_format(payload, output_path)
             if not output_format:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Output format is missing."
+                    "error": "Output format is missing.",
                 })
                 return
             if not category:
@@ -581,27 +389,27 @@ class ConvertHandler:
                 elif output_format in FONT_EXTENSIONS:
                     category = "font"
             if category == "image" and not Image:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Pillow is not available."
+                    "error": "Pillow is not available.",
                 })
                 return
             if output_format in ("psd", "ai"):
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Unsupported output format."
+                    "error": "Unsupported output format.",
                 })
                 return
             if output_format in ("heic", "heif") and pillow_heif is None:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "HEIC/HEIF requires pillow-heif."
+                    "error": "HEIC/HEIF requires pillow-heif.",
                 })
                 return
 
@@ -609,12 +417,22 @@ class ConvertHandler:
                 output_dir = os.path.dirname(output_path)
                 if output_dir:
                     os.makedirs(output_dir, exist_ok=True)
-                self._convert_archive(input_path, output_path, output_format, progress)
-                _emit({
+                input_format = self._detect_archive_format(input_path) or ""
+                temp_dir = tempfile.mkdtemp(prefix="pulsar-archive-")
+                try:
+                    run_in_worker_process(
+                        worker_convert_archive,
+                        (input_path, output_path, input_format, output_format, temp_dir),
+                        cancel_token=self.cancel_token,
+                        progress_callback=progress.emit,
+                    )
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": True,
-                    "output_path": output_path
+                    "output_path": output_path,
                 })
                 return
 
@@ -622,12 +440,17 @@ class ConvertHandler:
                 output_dir = os.path.dirname(output_path)
                 if output_dir:
                     os.makedirs(output_dir, exist_ok=True)
-                self._convert_font(input_path, output_path, output_format, progress)
-                _emit({
+                run_in_worker_process(
+                    worker_convert_font,
+                    (input_path, output_path, output_format),
+                    cancel_token=self.cancel_token,
+                    progress_callback=progress.emit,
+                )
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": True,
-                    "output_path": output_path
+                    "output_path": output_path,
                 })
                 return
 
@@ -635,19 +458,19 @@ class ConvertHandler:
                 ffmpeg_path = str(payload.get("ffmpeg_path") or "").strip()
                 ffmpeg_args = payload.get("ffmpeg_args")
                 if not ffmpeg_path:
-                    _emit({
+                    self._emit_terminal({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "FFmpeg path is missing."
+                        "error": "FFmpeg path is missing.",
                     })
                     return
                 if not isinstance(ffmpeg_args, list) or not ffmpeg_args:
-                    _emit({
+                    self._emit_terminal({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "FFmpeg args are missing."
+                        "error": "FFmpeg args are missing.",
                     })
                     return
                 total_seconds = None
@@ -658,70 +481,59 @@ class ConvertHandler:
                     total_seconds = None
 
                 progress.emit(0, force=True)
+
                 def on_progress(data):
                     percent, eta_seconds = resolve_progress_percent(data, total_seconds)
                     if percent is not None:
                         progress.emit(percent, eta_seconds=eta_seconds)
 
-                ret = run_ffmpeg_with_progress(self.task_id, ffmpeg_path, ffmpeg_args, on_progress)
+                ret = run_ffmpeg_with_progress(
+                    self.task_id,
+                    ffmpeg_path,
+                    ffmpeg_args,
+                    on_progress,
+                    cancel_token=self.cancel_token,
+                )
                 if ret != 0:
                     detail = getattr(ret, "stderr", "").strip()
                     error = f"FFmpeg conversion failed (exit code {int(ret)})."
                     if detail:
                         error = f"{error} {detail[-3000:]}"
-                    _emit({
+                    self._emit_terminal({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": error
+                        "error": error,
                     })
                     return
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": True,
-                    "output_path": output_path
+                    "output_path": output_path,
                 })
                 return
 
             if output_format == "svg":
-                progress.emit(0, force=True)
-                with Image.open(input_path) as img:
-                    if getattr(img, "is_animated", False):
-                        raise Exception("Animated images cannot be converted to SVG without losing frames.")
-                    progress.emit(15)
-                    original_size = img.size
-                    target_width = self._parse_int(payload.get("image_width"))
-                    target_height = self._parse_int(payload.get("image_height"))
-                    target_size = self._resolve_target_size(original_size, target_width, target_height)
-                    if target_size != original_size:
-                        img = img.resize(target_size, Image.LANCZOS)
-                        progress.emit(55)
-                    else:
-                        progress.emit(35)
-                    if img.mode not in ("RGBA", "RGB"):
-                        img = img.convert("RGBA")
-                    buffer = io.BytesIO()
-                    img.save(buffer, format="PNG")
-                    progress.emit(80)
-                    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                    width, height = target_size
-                    svg_payload = (
-                        '<?xml version="1.0" encoding="UTF-8"?>\n'
-                        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-                        f'viewBox="0 0 {width} {height}">'
-                        f'<image href="data:image/png;base64,{encoded}" width="{width}" height="{height}" />'
-                        '</svg>'
-                    )
-                    with open(output_path, "w", encoding="utf-8") as handle:
-                        handle.write(svg_payload)
-                    progress.emit(100, force=True)
-
-                _emit({
+                output_dir = os.path.dirname(output_path)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                run_in_worker_process(
+                    worker_convert_svg,
+                    (
+                        input_path,
+                        output_path,
+                        payload.get("image_width"),
+                        payload.get("image_height"),
+                    ),
+                    cancel_token=self.cancel_token,
+                    progress_callback=progress.emit,
+                )
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": True,
-                    "output_path": output_path
+                    "output_path": output_path,
                 })
                 return
 
@@ -730,85 +542,52 @@ class ConvertHandler:
             if ext_key not in registered and output_format in ("heic", "heif") and ".heif" in registered:
                 ext_key = ".heif"
             if ext_key not in registered:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Unsupported output format."
+                    "error": "Unsupported output format.",
                 })
                 return
             target_format = registered[ext_key]
             if target_format not in Image.SAVE and target_format not in Image.SAVE_ALL:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Unsupported output format."
+                    "error": "Unsupported output format.",
                 })
                 return
 
-            output_dir = os.path.dirname(output_path)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
+            run_in_worker_process(
+                worker_convert_image,
+                (
+                    input_path,
+                    output_path,
+                    output_format,
+                    target_format,
+                    payload.get("image_width"),
+                    payload.get("image_height"),
+                    payload.get("image_quality"),
+                ),
+                cancel_token=self.cancel_token,
+                progress_callback=progress.emit,
+            )
 
-            progress.emit(0, force=True)
-            with Image.open(input_path) as img:
-                progress.emit(15)
-                original_size = img.size
-                target_width = self._parse_int(payload.get("image_width"))
-                target_height = self._parse_int(payload.get("image_height"))
-                target_size = self._resolve_target_size(original_size, target_width, target_height)
-                save_kwargs = self._build_save_kwargs(target_format, payload.get("image_quality"), target_size)
-                frame_count = int(getattr(img, "n_frames", 1))
-                if frame_count > 1 and target_format not in Image.SAVE_ALL:
-                    raise Exception(f"{output_format.upper()} does not support animated image output.")
-
-                frames = []
-                durations = []
-                if frame_count > 1:
-                    for frame in ImageSequence.Iterator(img):
-                        current = frame.copy()
-                        if current.size != target_size:
-                            current = current.resize(target_size, Image.LANCZOS)
-                        if target_format in ("JPEG", "JPG"):
-                            current = self._ensure_rgb(current)
-                        frames.append(current)
-                        durations.append(frame.info.get("duration", img.info.get("duration", 0)))
-                else:
-                    current = img.copy()
-                    if current.size != target_size:
-                        current = current.resize(target_size, Image.LANCZOS)
-                    if target_format in ("JPEG", "JPG"):
-                        current = self._ensure_rgb(current)
-
-                progress.emit(55 if target_size != original_size else 35)
-                progress.emit(80)
-                if frame_count > 1:
-                    save_kwargs["save_all"] = True
-                    save_kwargs["append_images"] = frames[1:]
-                    if target_format in ("GIF", "PNG", "WEBP"):
-                        save_kwargs["duration"] = durations
-                        if "loop" in img.info:
-                            save_kwargs["loop"] = img.info["loop"]
-                    try:
-                        frames[0].save(output_path, format=target_format, **save_kwargs)
-                    finally:
-                        for frame in frames:
-                            frame.close()
-                else:
-                    current.save(output_path, format=target_format, **save_kwargs)
-                progress.emit(100, force=True)
-
-            _emit({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": True,
-                "output_path": output_path
+                "output_path": output_path,
             })
+        except TaskCancelledError:
+            if self.task_context is not None:
+                raise
+            self._emit_terminal({"type": "cancelled", "id": self.task_id})
         except Exception as e:
-            _emit({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": str(e),
             })

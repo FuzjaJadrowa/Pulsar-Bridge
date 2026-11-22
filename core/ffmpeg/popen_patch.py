@@ -186,15 +186,23 @@ def _ensure_patched():
             _is_patched = True
 
 @contextmanager
-def patch_ffmpeg_popen_for_progress(task_id, has_transcode=False):
+def patch_ffmpeg_popen_for_progress(task_id, has_transcode=False, cancel_token=None):
     _ensure_patched()
     _thread_local.task_id = task_id
     if has_transcode:
         with _task_transcodes_lock:
             _task_transcodes.add(task_id)
+
+    def _on_cancel():
+        kill_processes_for_task(task_id)
+
+    if cancel_token is not None:
+        cancel_token.register_callback(_on_cancel)
     try:
         yield
     finally:
+        if cancel_token is not None:
+            cancel_token.unregister_callback(_on_cancel)
         _thread_local.task_id = None
         with _task_transcodes_lock:
             _task_transcodes.discard(task_id)

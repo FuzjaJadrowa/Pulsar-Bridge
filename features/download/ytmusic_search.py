@@ -1,11 +1,20 @@
 import json
 import os
 import gettext
+from core.tasking import TaskCancelledError
 from core.utils import emit_json
 
 class YTMusicSearchHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            emit_json(payload)
 
     @staticmethod
     def _parse_limit(value):
@@ -67,9 +76,11 @@ class YTMusicSearchHandler:
 
     def run(self, args):
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
             query = str(args[0]).strip() if args else ""
             if not query:
-                emit_json({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
@@ -96,7 +107,7 @@ class YTMusicSearchHandler:
             try:
                 from ytmusicapi import YTMusic
             except Exception as e:
-                emit_json({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
@@ -111,6 +122,8 @@ class YTMusicSearchHandler:
 
             output = []
             for entry in results:
+                if self.cancel_token is not None:
+                    self.cancel_token.check()
                 if not isinstance(entry, dict):
                     continue
                 video_id = entry.get("videoId")
@@ -143,15 +156,25 @@ class YTMusicSearchHandler:
                 if len(output) >= limit:
                     break
 
-            emit_json({
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
+            self._emit_terminal({
                 "type": "search_results",
                 "id": self.task_id,
                 "success": True,
                 "data": output
             })
 
+        except (TaskCancelledError, SystemExit):
+            if self.task_context is not None:
+                raise TaskCancelledError("Cancelled")
+            self._emit_terminal({
+                "type": "cancelled",
+                "id": self.task_id,
+            })
         except Exception as e:
-            emit_json({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,

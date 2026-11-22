@@ -1,23 +1,22 @@
 import sys
 import json
-import traceback
 import threading
 import time
-from core.ffmpeg.output_parser import FFMpegOutputParser
 from core.ffmpeg.popen_patch import kill_processes_for_task
 from core.ffmpeg.runner import kill_all_ffmpeg
-from core.tasking import KillableThread
+from core.tasking import CancelToken, TaskCancelledError, TaskContext
 from core.utils import emit_json
-from core.logging import BridgeLogger
+
+
 def setup_windows_job_object():
     if sys.platform != "win32":
         return
     try:
         import ctypes
         from ctypes import wintypes
-        
+
         kernel32 = ctypes.windll.kernel32
-        
+
         class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
             _fields_ = [
                 ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
@@ -65,7 +64,7 @@ def setup_windows_job_object():
             job,
             JobObjectExtendedLimitInformation,
             ctypes.byref(info),
-            ctypes.sizeof(info)
+            ctypes.sizeof(info),
         )
         if res:
             process = kernel32.GetCurrentProcess()
@@ -73,8 +72,25 @@ def setup_windows_job_object():
     except Exception:
         pass
 
+
+class TaskHandle:
+    def __init__(self, task_id, context: TaskContext, thread: threading.Thread):
+        self.task_id = task_id
+        self.context = context
+        self.cancel_token = context.cancel_token
+        self.thread = thread
+
+    def is_alive(self) -> bool:
+        return self.thread.is_alive()
+
+    def request_cancel(self):
+        self.cancel_token.cancel()
+        kill_processes_for_task(self.task_id)
+
+
 active_tasks = {}
 active_tasks_lock = threading.Lock()
+
 
 class RateLimitedStdout:
     def __init__(self, stream, min_interval=0.4, throttled_types=None):
@@ -123,7 +139,7 @@ class RateLimitedStdout:
                 if line == "":
                     self.stream.write("\n")
                     continue
-                
+
                 line_str = line.strip()
                 should_skip = False
                 if line_str.startswith("{") and line_str.endswith("}"):
@@ -168,17 +184,78 @@ class RateLimitedStdout:
             return self.stream.writable()
         return True
 
+
 rate_limited_stdout = None
 PROTOCOL_VERSION = 1
+TASK_COMMANDS = (
+    "download",
+    "download_ffmpeg",
+    "metadata_d",
+    "metadata_c",
+    "metadata",
+    "convert",
+    "compress",
+    "search",
+)
 
-def run_task_with_cleanup(task_id, target_fn, *args, **kwargs):
+
+def _emit_task_error(task_id, code, message):
+    emit_json({
+        "type": "finished",
+        "id": task_id,
+        "success": False,
+        "code": code,
+        "error": message,
+        "message": message,
+    })
+
+
+def run_task_with_cleanup(task_context: TaskContext, target_fn, *args, **kwargs):
+    task_id = task_context.task_id
+    cancelled = False
+    unexpected_error = None
     try:
         target_fn(*args, **kwargs)
+    except TaskCancelledError:
+        cancelled = True
+    except SystemExit:
+        cancelled = True
+    except Exception as exc:
+        unexpected_error = str(exc)
     finally:
+        kill_processes_for_task(task_id)
         with active_tasks_lock:
-            active_tasks.pop(task_id, None)
+            current = active_tasks.get(task_id)
+            if current is not None and current.context is task_context:
+                active_tasks.pop(task_id, None)
         if rate_limited_stdout:
             rate_limited_stdout.clear_task(task_id)
+
+        if not task_context.terminal_emitted:
+            if cancelled or task_context.cancel_token.is_cancelled:
+                task_context.emit_terminal({
+                    "type": "cancelled",
+                    "id": task_id,
+                })
+            elif unexpected_error is not None:
+                task_context.emit_terminal({
+                    "type": "finished",
+                    "id": task_id,
+                    "success": False,
+                    "code": "INTERNAL_ERROR",
+                    "error": unexpected_error,
+                    "message": unexpected_error,
+                })
+            else:
+                task_context.emit_terminal({
+                    "type": "finished",
+                    "id": task_id,
+                    "success": False,
+                    "code": "MISSING_TERMINAL_EVENT",
+                    "error": "Task exited without emitting a terminal response.",
+                    "message": "Task exited without emitting a terminal response.",
+                })
+
 
 def main():
     global rate_limited_stdout
@@ -186,9 +263,13 @@ def main():
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-        sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-    rate_limited_stdout = RateLimitedStdout(sys.stdout, min_interval=0.4, throttled_types={"progress", "progress_ffmpeg", "log"})
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+        sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
+    rate_limited_stdout = RateLimitedStdout(
+        sys.stdout,
+        min_interval=0.4,
+        throttled_types={"progress", "progress_ffmpeg", "log"},
+    )
     sys.stdout = rate_limited_stdout
 
     from features.download.handler import DownloadHandler, DownloadMetadataHandler, SearchHandler
@@ -200,105 +281,180 @@ def main():
     try:
         for line in sys.stdin:
             task_id = None
+            command = None
             try:
                 if not line.strip():
                     continue
 
                 data = json.loads(line)
                 if not isinstance(data, dict):
-                    emit_json({"type": "error", "message": "Command must be a JSON object"})
+                    emit_json({
+                        "type": "error",
+                        "code": "INVALID_COMMAND",
+                        "error": "Command must be a JSON object",
+                        "message": "Command must be a JSON object",
+                    })
                     continue
 
                 command = data.get("command")
                 task_id = data.get("id")
                 if not isinstance(command, str):
-                    emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
-                               "message": "Command must be a string"})
+                    emit_json({
+                        "type": "error",
+                        "id": task_id if isinstance(task_id, str) else None,
+                        "code": "INVALID_COMMAND",
+                        "error": "Command must be a string",
+                        "message": "Command must be a string",
+                    })
                     continue
 
-                task_commands = ("download", "download_ffmpeg", "metadata_d", "metadata_c", "metadata", "convert", "compress", "search")
-                if command in task_commands:
+                if command in TASK_COMMANDS:
+                    if not isinstance(task_id, str) or not task_id.strip():
+                        emit_json({
+                            "type": "error",
+                            "code": "INVALID_TASK_ID",
+                            "error": "Task ID must be a non-empty string",
+                            "message": "Task ID must be a non-empty string",
+                        })
+                        continue
+
                     args = data.get("args", [])
                     payload = data.get("payload", None)
                     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-                        emit_json({"type": "error", "id": task_id, "message": "Args must be a list of strings"})
+                        _emit_task_error(task_id, "INVALID_ARGS", "Args must be a list of strings")
                         continue
                     if payload is not None and not isinstance(payload, dict):
-                        emit_json({"type": "error", "id": task_id, "message": "Payload must be a JSON object"})
+                        _emit_task_error(task_id, "INVALID_PAYLOAD", "Payload must be a JSON object")
                         continue
 
                     with active_tasks_lock:
                         existing = active_tasks.get(task_id)
                         if existing and existing.is_alive():
-                            emit_json({"type": "error", "id": task_id, "message": "A task with this ID is already running"})
+                            _emit_task_error(
+                                task_id,
+                                "TASK_ALREADY_RUNNING",
+                                "A task with this ID is already running",
+                            )
                             continue
 
+                    cancel_token = CancelToken()
+                    task_context = TaskContext(task_id, emit_json, cancel_token=cancel_token)
+
                     if command == "download":
-                        handler = DownloadHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
+                        handler = DownloadHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args,)
                     elif command == "download_ffmpeg":
-                        handler = DownloadHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run_ffmpeg_direct, args), daemon=True)
+                        handler = DownloadHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run_ffmpeg_direct
+                        target_args = (args,)
                     elif command in ("metadata_d", "metadata"):
-                        handler = DownloadMetadataHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
+                        handler = DownloadMetadataHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args,)
                     elif command == "metadata_c":
-                        handler = ConvertMetadataHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
+                        handler = ConvertMetadataHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args,)
                     elif command == "convert":
-                        handler = ConvertHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args, payload), daemon=True)
+                        handler = ConvertHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args, payload)
                     elif command == "compress":
-                        handler = CompressHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args, payload), daemon=True)
+                        handler = CompressHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args, payload)
                     elif command == "search":
-                        handler = SearchHandler(task_id)
-                        t = KillableThread(target=run_task_with_cleanup, args=(task_id, handler.run, args), daemon=True)
+                        handler = SearchHandler(task_id, cancel_token=cancel_token, task_context=task_context)
+                        target_fn = handler.run
+                        target_args = (args,)
+
+                    thread = threading.Thread(
+                        target=run_task_with_cleanup,
+                        args=(task_context, target_fn, *target_args),
+                        daemon=True,
+                    )
+                    handle = TaskHandle(task_id, task_context, thread)
 
                     with active_tasks_lock:
                         existing = active_tasks.get(task_id)
                         if existing and existing.is_alive():
-                            emit_json({"type": "error", "id": task_id, "message": "A task with this ID is already running"})
+                            _emit_task_error(
+                                task_id,
+                                "TASK_ALREADY_RUNNING",
+                                "A task with this ID is already running",
+                            )
                             continue
-                        active_tasks[task_id] = t
+                        active_tasks[task_id] = handle
                         try:
-                            t.start()
-                        except Exception:
+                            thread.start()
+                        except Exception as start_exc:
                             active_tasks.pop(task_id, None)
-                            raise
+                            _emit_task_error(task_id, "START_FAILED", str(start_exc))
+                            continue
 
                 elif command == "cancel":
-                    kill_processes_for_task(task_id)
                     with active_tasks_lock:
-                        thread = active_tasks.get(task_id)
-                    if rate_limited_stdout:
-                        rate_limited_stdout.clear_task(task_id)
-                    if thread and thread.is_alive():
-                        thread.terminate()
-                        emit_json({"type": "cancelled", "id": task_id})
+                        handle = active_tasks.get(task_id)
+                    if handle and handle.is_alive():
+                        handle.request_cancel()
                     else:
-                        emit_json({"type": "error", "id": task_id, "message": "Task not found"})
+                        kill_processes_for_task(task_id)
+                        if rate_limited_stdout:
+                            rate_limited_stdout.clear_task(task_id)
+                        emit_json({
+                            "type": "error",
+                            "command": "cancel",
+                            "id": task_id if isinstance(task_id, str) else None,
+                            "code": "TASK_NOT_FOUND",
+                            "message": "Task not found",
+                        })
 
                 elif command == "exit":
                     break
                 else:
-                    emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
-                               "message": f"Unknown command: {command}"})
+                    msg = f"Unknown command: {command}"
+                    emit_json({
+                        "type": "error",
+                        "id": task_id if isinstance(task_id, str) else None,
+                        "code": "UNKNOWN_COMMAND",
+                        "error": msg,
+                        "message": msg,
+                    })
 
             except json.JSONDecodeError:
-                emit_json({"type": "error", "message": "Invalid JSON"})
+                emit_json({
+                    "type": "error",
+                    "code": "INVALID_JSON",
+                    "error": "Invalid JSON",
+                    "message": "Invalid JSON",
+                })
             except Exception as e:
-                emit_json({"type": "error", "id": task_id if isinstance(task_id, str) else None,
-                           "message": str(e)})
+                if command in TASK_COMMANDS and isinstance(task_id, str) and task_id.strip():
+                    _emit_task_error(task_id, "DISPATCH_ERROR", str(e))
+                else:
+                    emit_json({
+                        "type": "error",
+                        "id": task_id if isinstance(task_id, str) else None,
+                        "code": "INTERNAL_ERROR",
+                        "error": str(e),
+                        "message": str(e),
+                    })
     finally:
         with active_tasks_lock:
-            active_ids = list(active_tasks.keys())
+            handles = list(active_tasks.values())
             active_tasks.clear()
 
-        for active_id in active_ids:
-            kill_processes_for_task(active_id)
+        for handle in handles:
+            handle.request_cancel()
 
         kill_all_ffmpeg()
+
+        deadline = time.monotonic() + 2.0
+        for handle in handles:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining > 0 and handle.is_alive():
+                handle.thread.join(timeout=remaining)
 
 if __name__ == "__main__":
     main()

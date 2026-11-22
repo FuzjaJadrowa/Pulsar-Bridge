@@ -7,13 +7,22 @@ from features.download.ytmusic_search import YTMusicSearchHandler
 from core.ffmpeg.popen_patch import patch_ffmpeg_popen_for_progress
 from features.download.extractors import create_resolver_ydl, metadata_fallback
 from core.logging import BridgeLogger
+from core.tasking import TaskCancelledError
 from core.utils import emit_json, resolve_progress_percent
 
 class DownloadHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
         self.expected_playlist_count = None
         self.current_playlist_index = 1
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            emit_json(payload)
 
     @staticmethod
     def _parse_int(value):
@@ -41,6 +50,8 @@ class DownloadHandler:
         return index, count
 
     def _progress_hook(self, d):
+        if self.cancel_token is not None:
+            self.cancel_token.check()
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
             downloaded = d.get('downloaded_bytes', 0)
@@ -116,8 +127,10 @@ class DownloadHandler:
             return
 
     def run(self, args_list):
-        logger = BridgeLogger(self.task_id)
+        logger = BridgeLogger(self.task_id, cancel_token=self.cancel_token)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
             parsed_args = yt_dlp.parse_options(args_list)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
@@ -129,11 +142,19 @@ class DownloadHandler:
             ydl_opts['logger'] = logger
             ydl_opts['no_color'] = True
             ydl_opts['ignoreerrors'] = False
+            ydl_opts.setdefault('socket_timeout', 20)
 
-            with patch_ffmpeg_popen_for_progress(self.task_id, self.has_transcode):
+            with patch_ffmpeg_popen_for_progress(
+                self.task_id,
+                self.has_transcode,
+                cancel_token=self.cancel_token,
+            ):
                 with create_resolver_ydl(ydl_opts) as ydl:
                     self._force_same_container_video_encode(ydl)
                     retcode = ydl.download(urls)
+
+            if self.cancel_token is not None:
+                self.cancel_token.check()
 
             if retcode != 0:
                 raise Exception(f"yt-dlp exited with error code {retcode}")
@@ -147,24 +168,29 @@ class DownloadHandler:
                 "status": "completed",
                 "stage": "completed"
             })
-            emit_json({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": True
             })
 
-        except SystemExit:
-            emit_json({
-                "type": "finished",
+        except (TaskCancelledError, SystemExit):
+            if self.task_context is not None:
+                raise TaskCancelledError("Cancelled")
+            self._emit_terminal({
+                "type": "cancelled",
                 "id": self.task_id,
-                "success": False,
-                "error": "Cancelled"
             })
         except Exception as e:
+            if self.cancel_token is not None and self.cancel_token.is_cancelled:
+                if self.task_context is not None:
+                    raise TaskCancelledError("Cancelled")
+                self._emit_terminal({"type": "cancelled", "id": self.task_id})
+                return
             error_msg = logger.last_error or str(e)
             if "yt-dlp exited with error code" in error_msg:
                 error_msg = "Download failed."
-            emit_json({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
@@ -174,13 +200,16 @@ class DownloadHandler:
     def run_ffmpeg_direct(self, args_list):
         from core.ffmpeg.runner import run_ffmpeg_with_progress
 
-        logger = BridgeLogger(self.task_id)
+        logger = BridgeLogger(self.task_id, cancel_token=self.cancel_token)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
             parsed = yt_dlp.parse_options(args_list)
             urls, ydl_opts = parsed[2], parsed[3]
             if not urls:
                 raise ValueError("No URL provided")
             ydl_opts.update({'quiet': True, 'no_warnings': True, 'logger': logger, 'skip_download': True})
+            ydl_opts.setdefault('socket_timeout', 20)
             if ydl_opts.get('cookiesfrombrowser') or ydl_opts.get('cookiefile'):
                 emit_json({'type': 'status', 'id': self.task_id, 'stage': 'downloading', 'msg': 'Using yt-dlp to preserve cookie authentication'})
                 return self.run(args_list)
@@ -256,17 +285,40 @@ class DownloadHandler:
                         payload['eta_seconds'] = eta
                     emit_json(payload)
 
-                result = run_ffmpeg_with_progress(self.task_id, ffmpeg_path, command_args, on_progress)
+                result = run_ffmpeg_with_progress(
+                    self.task_id,
+                    ffmpeg_path,
+                    command_args,
+                    on_progress,
+                    cancel_token=self.cancel_token,
+                )
                 if result != 0:
                     raise RuntimeError(getattr(result, 'stderr', '') or f'FFmpeg exited with code {result}')
                 emit_json({'type': 'progress', 'id': self.task_id, 'stage': 'converting', 'status': 'converting', 'percent': 100.0, 'eta_seconds': 0})
-                emit_json({'type': 'finished', 'id': self.task_id, 'success': True, 'filepath': output_path})
+                self._emit_terminal({'type': 'finished', 'id': self.task_id, 'success': True, 'filepath': output_path})
+        except (TaskCancelledError, SystemExit):
+            if self.task_context is not None:
+                raise TaskCancelledError("Cancelled")
+            self._emit_terminal({'type': 'cancelled', 'id': self.task_id})
         except Exception as exc:
-            emit_json({'type': 'finished', 'id': self.task_id, 'success': False, 'error': str(exc)})
+            if self.cancel_token is not None and self.cancel_token.is_cancelled:
+                if self.task_context is not None:
+                    raise TaskCancelledError("Cancelled")
+                self._emit_terminal({'type': 'cancelled', 'id': self.task_id})
+                return
+            self._emit_terminal({'type': 'finished', 'id': self.task_id, 'success': False, 'error': str(exc)})
 
 class DownloadMetadataHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            emit_json(payload)
 
     def _filter_metadata(self, info, force_subtitle_langs=False):
         keys_to_keep = [
@@ -357,8 +409,10 @@ class DownloadMetadataHandler:
         return ("youtube.com" in lowered) or ("youtu.be" in lowered) or ("music.youtube.com" in lowered)
 
     def run(self, args):
-        logger = BridgeLogger(self.task_id)
+        logger = BridgeLogger(self.task_id, cancel_token=self.cancel_token)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
             parsed_args = yt_dlp.parse_options(args)
             urls, ydl_opts = parsed_args[2], parsed_args[3]
             if not urls:
@@ -369,6 +423,7 @@ class DownloadMetadataHandler:
                 'extract_flat': False, 'writesubtitles': True, 'writeautomaticsub': True,
                 'pulsar_metadata': True,
             })
+            ydl_opts.setdefault('socket_timeout', 20)
             if self._is_youtube_playlist_url(urls[0]):
                 ydl_opts.update({'extract_flat': 'in_playlist', 'playlistend': 1, 'playlist_items': '1'})
 
@@ -380,6 +435,8 @@ class DownloadMetadataHandler:
                         raise Exception("No metadata extracted")
                     force_subs = any(info.get(source) for source in ('spotify', 'apple_music', 'deezer'))
                     minimized_info = self._filter_metadata(ydl.sanitize_info(info), force_subtitle_langs=force_subs)
+                except (TaskCancelledError, SystemExit):
+                    raise
                 except Exception as exc:
                     extraction_error = exc
 
@@ -402,19 +459,37 @@ class DownloadMetadataHandler:
                         'player_host': fallback.get('player_host') or fallback.get('resolved_host'),
                     }
 
-            emit_json({'type': 'metadata', 'id': self.task_id, 'success': True, 'data': minimized_info})
-        except SystemExit:
-            emit_json({'type': 'finished', 'id': self.task_id, 'success': False, 'error': 'Cancelled'})
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
+            self._emit_terminal({'type': 'metadata', 'id': self.task_id, 'success': True, 'data': minimized_info})
+        except (TaskCancelledError, SystemExit):
+            if self.task_context is not None:
+                raise TaskCancelledError("Cancelled")
+            self._emit_terminal({'type': 'cancelled', 'id': self.task_id})
         except Exception as exc:
-            emit_json({
+            if self.cancel_token is not None and self.cancel_token.is_cancelled:
+                if self.task_context is not None:
+                    raise TaskCancelledError("Cancelled")
+                self._emit_terminal({'type': 'cancelled', 'id': self.task_id})
+                return
+            self._emit_terminal({
                 'type': 'finished', 'id': self.task_id, 'success': False,
                 'error': logger.last_error or str(exc),
             })
 
 
 class SearchHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            emit_json(payload)
 
     @staticmethod
     def _format_duration(seconds):
@@ -453,14 +528,16 @@ class SearchHandler:
         return query.strip(), max(1, min(limit, 50))
 
     def run(self, args):
-        logger = BridgeLogger(self.task_id)
+        logger = BridgeLogger(self.task_id, cancel_token=self.cancel_token)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
             parsed_args = yt_dlp.parse_options(args)
             ydl_opts = parsed_args[3]
             urls = parsed_args[2]
 
             if not urls:
-                emit_json({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
@@ -470,7 +547,11 @@ class SearchHandler:
 
             query, limit = self._parse_ytmusic_search(urls[0])
             if query is not None:
-                ytm_handler = YTMusicSearchHandler(self.task_id)
+                ytm_handler = YTMusicSearchHandler(
+                    self.task_id,
+                    cancel_token=self.cancel_token,
+                    task_context=self.task_context,
+                )
                 ytm_handler.run([query, str(limit)])
                 return
 
@@ -483,6 +564,7 @@ class SearchHandler:
                 'skip_download': True,
             }
             ydl_opts.update(override_opts)
+            ydl_opts.setdefault('socket_timeout', 20)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(urls[0], download=False)
@@ -491,6 +573,8 @@ class SearchHandler:
 
                 results = []
                 for entry in raw_entries:
+                    if self.cancel_token is not None:
+                        self.cancel_token.check()
                     if not entry:
                         continue
 
@@ -511,22 +595,30 @@ class SearchHandler:
                         'url': entry.get('url') or entry.get('webpage_url')
                     })
 
-            emit_json({
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
+            self._emit_terminal({
                 "type": "search_results",
                 "id": self.task_id,
                 "success": True,
                 "data": results
             })
 
-        except SystemExit:
-            emit_json({
-                "type": "finished",
+        except (TaskCancelledError, SystemExit):
+            if self.task_context is not None:
+                raise TaskCancelledError("Cancelled")
+            self._emit_terminal({
+                "type": "cancelled",
                 "id": self.task_id,
-                "success": False,
-                "error": "Cancelled"
             })
         except Exception as e:
-            emit_json({
+            if self.cancel_token is not None and self.cancel_token.is_cancelled:
+                if self.task_context is not None:
+                    raise TaskCancelledError("Cancelled")
+                self._emit_terminal({"type": "cancelled", "id": self.task_id})
+                return
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,

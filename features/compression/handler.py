@@ -1,23 +1,52 @@
+import glob
 import json
 import os
-import time
 import tempfile
-import glob
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 from core.ffmpeg.runner import run_ffmpeg_with_progress
+from core.tasking import TaskCancelledError, run_in_worker_process
 from core.utils import emit_json, ProgressEmitter, parse_ffmpeg_speed, resolve_progress_percent
+from core.worker import worker_compress_animated_image
 
 _emit = emit_json
 _ProgressEmitter = ProgressEmitter
 _resolve_progress_percent = resolve_progress_percent
 
+
+def _detect_animated_image(path):
+    if not Image or not path or not os.path.isfile(path):
+        return False
+    try:
+        with Image.open(path) as img:
+            frame_count = int(getattr(img, "n_frames", 1) or 1)
+            return bool(getattr(img, "is_animated", False)) or frame_count > 1
+    except Exception:
+        return False
+
+
 class CompressHandler:
-    def __init__(self, task_id):
+    def __init__(self, task_id, cancel_token=None, task_context=None):
         self.task_id = task_id
+        self.cancel_token = cancel_token or (task_context.cancel_token if task_context else None)
+        self.task_context = task_context
+
+    def _emit_terminal(self, payload):
+        if self.task_context is not None:
+            self.task_context.emit_terminal(payload)
+        else:
+            _emit(payload)
 
     def run(self, args, payload=None):
         progress = _ProgressEmitter(self.task_id)
         try:
+            if self.cancel_token is not None:
+                self.cancel_token.check()
+
             if payload is None:
                 payload = None
                 if args:
@@ -34,19 +63,19 @@ class CompressHandler:
             ffmpeg_path = str(payload.get("ffmpeg_path") or "").strip()
             ffmpeg_args = payload.get("ffmpeg_args")
             if not input_path:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Input path is missing."
+                    "error": "Input path is missing.",
                 })
                 return
             if not os.path.isfile(input_path):
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "File not found."
+                    "error": "File not found.",
                 })
                 return
             if category not in ("video", "audio", "image"):
@@ -59,35 +88,66 @@ class CompressHandler:
                 if detected_cat in ("video", "audio", "image"):
                     category = detected_cat
                 else:
-                    _emit({
+                    self._emit_terminal({
                         "type": "finished",
                         "id": self.task_id,
                         "success": False,
-                        "error": "Unsupported compression category."
+                        "error": "Unsupported compression category.",
                     })
                     return
             if not output_path:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "Output path is missing."
+                    "error": "Output path is missing.",
                 })
                 return
+
+            if category == "image" and (
+                bool(payload.get("is_animated")) or _detect_animated_image(input_path)
+            ):
+                output_format = str(payload.get("output_format") or "").strip().lstrip(".").lower()
+                if not output_format:
+                    _, ext = os.path.splitext(output_path)
+                    output_format = ext.lstrip(".").lower()
+                run_in_worker_process(
+                    worker_compress_animated_image,
+                    (
+                        input_path,
+                        output_path,
+                        output_format,
+                        payload.get("compress_mode"),
+                        payload.get("target_percent"),
+                        payload.get("target_size_bytes"),
+                        payload.get("source_size_bytes"),
+                        payload.get("crf"),
+                    ),
+                    cancel_token=self.cancel_token,
+                    progress_callback=progress.emit,
+                )
+                self._emit_terminal({
+                    "type": "finished",
+                    "id": self.task_id,
+                    "success": True,
+                    "output_path": output_path,
+                })
+                return
+
             if not ffmpeg_path:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "FFmpeg path is missing."
+                    "error": "FFmpeg path is missing.",
                 })
                 return
             if not isinstance(ffmpeg_args, list) or not ffmpeg_args:
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": "FFmpeg args are missing."
+                    "error": "FFmpeg args are missing.",
                 })
                 return
 
@@ -131,8 +191,14 @@ class CompressHandler:
                             progress.emit(percent * 0.5, eta_seconds=scaled_eta)
 
                     ret = run_ffmpeg_with_progress(
-                        self.task_id, ffmpeg_path, first_args, on_first_pass
+                        self.task_id,
+                        ffmpeg_path,
+                        first_args,
+                        on_first_pass,
+                        cancel_token=self.cancel_token,
                     )
+                    if self.cancel_token is not None:
+                        self.cancel_token.check()
                     if ret == 0:
                         def on_second_pass(data):
                             percent, eta_seconds = _resolve_progress_percent(data, total_seconds)
@@ -140,11 +206,19 @@ class CompressHandler:
                                 progress.emit(50.0 + percent * 0.5, eta_seconds=eta_seconds)
 
                         ret = run_ffmpeg_with_progress(
-                            self.task_id, ffmpeg_path, second_args, on_second_pass
+                            self.task_id,
+                            ffmpeg_path,
+                            second_args,
+                            on_second_pass,
+                            cancel_token=self.cancel_token,
                         )
                 else:
                     ret = run_ffmpeg_with_progress(
-                        self.task_id, ffmpeg_path, ffmpeg_args, on_progress
+                        self.task_id,
+                        ffmpeg_path,
+                        ffmpeg_args,
+                        on_progress,
+                        cancel_token=self.cancel_token,
                     )
             finally:
                 if pass_log:
@@ -159,24 +233,28 @@ class CompressHandler:
                 error = f"FFmpeg compression failed (exit code {int(ret)})."
                 if detail:
                     error = f"{error} {detail[-3000:]}"
-                _emit({
+                self._emit_terminal({
                     "type": "finished",
                     "id": self.task_id,
                     "success": False,
-                    "error": error
+                    "error": error,
                 })
                 return
 
-            _emit({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": True,
-                "output_path": output_path
+                "output_path": output_path,
             })
+        except TaskCancelledError:
+            if self.task_context is not None:
+                raise
+            self._emit_terminal({"type": "cancelled", "id": self.task_id})
         except Exception as e:
-            _emit({
+            self._emit_terminal({
                 "type": "finished",
                 "id": self.task_id,
                 "success": False,
-                "error": str(e)
+                "error": str(e),
             })
