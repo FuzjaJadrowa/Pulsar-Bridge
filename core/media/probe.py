@@ -6,11 +6,9 @@ import sys
 import threading
 from collections import OrderedDict
 
-
 _PROBE_CACHE_MAX = 256
 _probe_cache = OrderedDict()
 _probe_cache_lock = threading.Lock()
-
 
 def _file_fingerprint(path):
     try:
@@ -18,7 +16,6 @@ def _file_fingerprint(path):
         return (os.path.realpath(path), st.st_mtime_ns, st.st_size)
     except OSError:
         return None
-
 
 def resolve_ffprobe_path(ffprobe_path=None, ffmpeg_path=None):
     if ffprobe_path:
@@ -33,7 +30,6 @@ def resolve_ffprobe_path(ffprobe_path=None, ffmpeg_path=None):
             if os.path.isfile(sibling):
                 return sibling
     return shutil.which("ffprobe")
-
 
 def _parse_float(value):
     if value is None:
@@ -52,7 +48,6 @@ def _parse_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
-
 
 def parse_ffprobe_output(raw_json):
     if not raw_json:
@@ -97,9 +92,7 @@ def parse_ffprobe_output(raw_json):
         "streams": streams,
     }
 
-
 def probe_media(path, ffprobe_path=None, ffmpeg_path=None, timeout=15):
-    """Probe streams and format metadata using ffprobe, cached by file fingerprint."""
     if not path or not os.path.isfile(path):
         return None
 
